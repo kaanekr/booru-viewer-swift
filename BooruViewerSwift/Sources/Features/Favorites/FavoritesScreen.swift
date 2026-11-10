@@ -61,6 +61,8 @@ struct FavoritesScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // Stock segmented control: the system owns its glass, selection pill, and
+            // Dynamic Type scaling, so no custom background or outline is layered on it.
             Picker("Section", selection: segmentBinding) {
                 ForEach(FavoritesViewModel.Segment.allCases) { segment in
                     Text(segment.title).tag(segment)
@@ -84,6 +86,20 @@ struct FavoritesScreen: View {
         .background(AppTheme.background.ignoresSafeArea())
         .navigationTitle("Favorites")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    Task {
+                        await model.load()
+                        await loadBlacklist()
+                    }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .accessibilityLabel("Reload favorites")
+                .accessibilityIdentifier("favorites.reload")
+            }
+        }
         .task(id: model.segment) {
             await model.load()
             await loadBlacklist()
@@ -152,6 +168,9 @@ struct FavoritesScreen: View {
         }
     }
 
+    /// Source filter: a native `Menu` (system-rendered popover with checkmarks on the
+    /// active row) whose label is a plain `Label` in the accent tint. No capsule artwork or
+    /// stroke is drawn: the menu keeps an honest 44 pt tap target through layout, not paint.
     private var sourceFilterBar: some View {
         HStack(spacing: AppTheme.Spacing.item) {
             Menu {
@@ -176,34 +195,33 @@ struct FavoritesScreen: View {
                     }
                 }
             } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "line.3.horizontal.decrease.circle")
-                    Text(model.selectedSourceName)
-                        .lineLimit(1)
-                    Image(systemName: "chevron.down")
-                        .font(.caption2)
-                }
-                .font(AppTheme.Typography.body.weight(.semibold))
-                .foregroundStyle(AppTheme.primary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(AppTheme.card, in: Capsule())
-                .overlay(Capsule().stroke(AppTheme.border, lineWidth: 1))
-                // The capsule keeps its compact paint (~28 pt) because the background is applied
-                // first. The frame below is real layout, so the menu owns an honest 44 pt tap
-                // target and nothing extends past its bounds into the first card.
-                .frame(minHeight: AppTheme.Spacing.minimumHitTarget)
-                .contentShape(Rectangle())
+                Label(model.selectedSourceName, systemImage: "line.3.horizontal.decrease.circle")
+                    .font(AppTheme.Typography.body.weight(.semibold))
+                    // The menu label keeps the brand accent explicitly: a `Menu` does not
+                    // always inherit the tint for its label on every system version.
+                    .foregroundStyle(AppTheme.primary)
+                    .lineLimit(1)
+                    .frame(minHeight: AppTheme.Spacing.minimumHitTarget)
+                    .contentShape(Rectangle())
             }
+            .accessibilityLabel("Filter by source, \(model.selectedSourceName)")
+            .accessibilityIdentifier("favorites.sourceFilter")
+
             Spacer(minLength: 0)
+
             Text("\(model.visibleFavorites.count)")
-                .font(AppTheme.Typography.body)
+                .font(AppTheme.Typography.secondary.weight(.semibold))
+                .monospacedDigit()
                 .foregroundStyle(AppTheme.textSecondary)
+                .accessibilityLabel(Self.postCountLabel(model.visibleFavorites.count))
         }
     }
 
     // MARK: Favorite tags
 
+    /// Favorite tags: a native grouped `List` (system rows, separators, swipe targets) with
+    /// a stock text field row, a native `Add` button, and a trash button that keeps a real
+    /// 44 pt lane. Tag chips keep the shared `TagChipView` (Liquid Glass when interactive).
     private var favoriteTagsSection: some View {
         List {
             Section {
@@ -211,6 +229,7 @@ struct FavoritesScreen: View {
                     TextField("Add a tag", text: $newTagText)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .submitLabel(.done)
                         .onSubmit(submitNewTag)
                         .foregroundStyle(AppTheme.textPrimary)
                     Button("Add", action: submitNewTag)
@@ -229,21 +248,21 @@ struct FavoritesScreen: View {
                             TagChipView(text: tag, onTap: { onSelectTag(tag) })
                                 .contextMenu { tagContextMenu(for: tag) }
                             Spacer(minLength: 0)
-                            Button {
+                            Button(role: .destructive) {
                                 Task { await model.removeFavoriteTag(tag) }
                             } label: {
                                 Image(systemName: "trash")
-                                    .font(.system(size: AppTheme.Icon.small))
-                                    .foregroundStyle(AppTheme.danger)
-                                    // A real 44 pt frame, not padding: the tap target is fully
-                                    // allocated inside the row.
+                                    .font(AppTheme.Typography.body)
                                     .frame(
                                         minWidth: AppTheme.Spacing.minimumHitTarget,
                                         minHeight: AppTheme.Spacing.minimumHitTarget
                                     )
                                     .contentShape(Rectangle())
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.borderless)
+                            // Semantic danger tint: the red comes from the system colour, so it
+                            // keeps its contrast on either appearance instead of a fixed hex.
+                            .tint(AppTheme.danger)
                             .accessibilityLabel("Remove \(tag)")
                         }
                     }
@@ -272,21 +291,24 @@ struct FavoritesScreen: View {
                 LazyVStack(alignment: .leading, spacing: AppTheme.Spacing.section) {
                     HStack(spacing: AppTheme.Spacing.item) {
                         Text("\(model.recentViews.count) posts")
-                            .font(AppTheme.Typography.body)
+                            .font(AppTheme.Typography.secondary.weight(.semibold))
+                            .monospacedDigit()
                             .foregroundStyle(AppTheme.textSecondary)
                         Spacer(minLength: 0)
+                        // Native destructive button: the system supplies the red role
+                        // treatment; the 44 pt lane is real layout, not painted padding.
                         Button(role: .destructive) {
                             isConfirmingClear = true
                         } label: {
                             Label("Clear", systemImage: "trash")
                                 .font(AppTheme.Typography.body.weight(.semibold))
-                                // Real layout height instead of padding handback: the button owns a
-                                // 44 pt tap target and nothing bleeds outside the header row.
                                 .frame(minHeight: AppTheme.Spacing.minimumHitTarget)
                                 .contentShape(Rectangle())
                         }
+                        .buttonStyle(.borderless)
                         .disabled(model.recentViews.isEmpty)
                         .accessibilityLabel("Clear recent views")
+                        .accessibilityIdentifier("favorites.clearHistory")
                     }
 
                     if model.isLoading {
@@ -356,6 +378,11 @@ struct FavoritesScreen: View {
         let usable = totalWidth - horizontalPadding * 2 - columnSpacing
         guard usable > 0 else { return 0 }
         return (usable / CGFloat(MasonryColumns.defaultColumnCount)).rounded(.down)
+    }
+
+    /// Spoken post count with correct singular/plural ("1 post", "12 posts").
+    private static func postCountLabel(_ count: Int) -> String {
+        count == 1 ? "1 post" : "\(count) posts"
     }
 
     private func emptyState(systemImage: String, title: String, message: String) -> some View {

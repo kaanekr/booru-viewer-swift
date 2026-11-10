@@ -4,82 +4,200 @@ import UniformTypeIdentifiers
 
 // MARK: - Shared building blocks
 
-/// Presents `SettingsViewModel.alert` from whichever settings page is on screen.
+/// Presents `SettingsViewModel.alert` through the stock system alert.
+///
+/// Wired exactly like the previous `.alert(item:)` pass: the home page and every subpage
+/// attach it to the same payload, so the page that raised an action always has its own
+/// presentation host. Dismissing clears `model.alert`, which leaves nothing for another
+/// host to re-present: one action still shows at most one alert.
 private struct SettingsAlertModifier: ViewModifier {
     let model: SettingsViewModel
 
     func body(content: Content) -> some View {
-        @Bindable var model = model
-        content.alert(item: $model.alert) { state in
-            Alert(
-                title: Text(state.title),
-                message: Text(state.message),
-                dismissButton: .default(Text("OK"))
-            )
+        content.alert(
+            model.alert?.title ?? "",
+            isPresented: Binding(
+                get: { model.alert != nil },
+                set: { presented in
+                    if !presented { model.alert = nil }
+                }
+            ),
+            presenting: model.alert
+        ) { _ in
+            Button("OK", role: .cancel) {}
+        } message: { state in
+            Text(state.message)
         }
     }
 }
 
 extension View {
-    /// Attaches the settings alert to a subpage.
+    /// Attaches the settings alert to a page.
     func settingsAlert(_ model: SettingsViewModel) -> some View {
         modifier(SettingsAlertModifier(model: model))
     }
 }
 
-
-/// Short page introduction, matching the RN `pageIntro` style.
-struct SettingsPageIntro: View {
-    let text: String
-
-    var body: some View {
-        Text(text)
-            .font(AppTheme.Typography.body)
-            .foregroundStyle(AppTheme.color(0xA1A6BB))
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-/// Uppercase caption above a grouped card (RN `SettingsSection`).
-struct SettingsSection<Content: View>: View {
+/// One row's label: optional icon, title, optional subtitle, optional trailing value.
+///
+/// The enclosing `Section` supplies the card fill, separators, inset and disclosure
+/// chevron, so this view paints nothing but text and a tinted glyph.
+struct SettingsRow: View {
     let title: String
-    var hint: String?
-    let content: Content
-
-    init(title: String, hint: String? = nil, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.hint = hint
-        self.content = content()
-    }
+    var subtitle: String? = nil
+    var systemImage: String? = nil
+    var value: String? = nil
+    var isDanger = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
-            Text(title.uppercased())
-                .font(AppTheme.Typography.caption)
-                .kerning(1.4)
-                .foregroundStyle(AppTheme.textSecondary)
-                .padding(.leading, 4)
-
-            VStack(spacing: 0) {
-                content
+        HStack(spacing: AppTheme.Spacing.item) {
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: AppTheme.Icon.small, weight: .semibold))
+                    .foregroundStyle(isDanger ? AppTheme.danger : AppTheme.primary)
+                    .frame(minWidth: 22, alignment: .center)
+                    .accessibilityHidden(true)
             }
-            .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 14))
-            .overlay(
-                RoundedRectangle(cornerRadius: 14)
-                    .stroke(AppTheme.border, lineWidth: 1)
-            )
 
-            if let hint {
-                SettingsHint(text: hint)
-                    .padding(.horizontal, 4)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(AppTheme.Typography.body)
+                    .foregroundStyle(isDanger ? AppTheme.danger : AppTheme.textPrimary)
+
+                if let subtitle {
+                    Text(subtitle)
+                        .font(AppTheme.Typography.secondary)
+                        .foregroundStyle(AppTheme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Spacer(minLength: AppTheme.Spacing.item)
+
+            if let value {
+                Text(value)
+                    .font(AppTheme.Typography.secondary)
+                    .foregroundStyle(AppTheme.textSecondary)
+                    .lineLimit(1)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 }
 
-/// Muted helper copy shown under a section or a form.
+/// Native `Toggle` row with an optional subtitle and icon.
+struct SettingsToggleRow: View {
+    let title: String
+    var subtitle: String? = nil
+    var systemImage: String? = nil
+    let isOn: Bool
+    var isBusy = false
+    let onChange: (Bool) -> Void
+
+    var body: some View {
+        Toggle(
+            isOn: Binding(
+                get: { isOn },
+                set: { value in
+                    guard !isBusy else { return }
+                    onChange(value)
+                }
+            )
+        ) {
+            HStack(spacing: AppTheme.Spacing.item) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: AppTheme.Icon.small, weight: .semibold))
+                        .foregroundStyle(AppTheme.primary)
+                        .accessibilityHidden(true)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(AppTheme.Typography.body)
+                        .foregroundStyle(AppTheme.textPrimary)
+
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(AppTheme.Typography.secondary)
+                            .foregroundStyle(AppTheme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+        .tint(AppTheme.primary)
+        .disabled(isBusy)
+    }
+}
+
+/// Full-width action row. Destructive actions use the system red through `ButtonRole`.
+struct SettingsActionButton: View {
+    let title: String
+    var isSecondary = false
+    var isDanger = false
+    var isBusy = false
+    var isDisabled = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(role: buttonRole, action: action) {
+            HStack(spacing: AppTheme.Spacing.item) {
+                Spacer(minLength: 0)
+
+                if isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Text(title)
+                        .font(AppTheme.Typography.body)
+                        .fontWeight(isSecondary ? .regular : .semibold)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .disabled(isDisabled || isBusy)
+    }
+
+    /// `nil` for a standard button so the row keeps the accent; destructive rows go red.
+    private var buttonRole: ButtonRole? {
+        isDanger ? .destructive : nil
+    }
+}
+
+/// Labeled text field row (`LabeledContent` + `TextField` / `SecureField`).
+struct SettingsField: View {
+    let label: String
+    var placeholder: String = ""
+    @Binding var text: String
+    var isSecure = false
+    var isNumeric = false
+    var isURL = false
+
+    var body: some View {
+        LabeledContent {
+            Group {
+                if isSecure {
+                    SecureField("", text: $text, prompt: Text(placeholder))
+                } else {
+                    TextField("", text: $text, prompt: Text(placeholder))
+                }
+            }
+            .multilineTextAlignment(.trailing)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .keyboardType(isNumeric ? .numberPad : (isURL ? .URL : .default))
+            .accessibilityLabel(label)
+        } label: {
+            Text(label)
+                .font(AppTheme.Typography.body)
+        }
+    }
+}
+
+/// Muted helper copy; used as a `Section` footer so the system styles and insets it.
 struct SettingsHint: View {
     let text: String
 
@@ -87,29 +205,8 @@ struct SettingsHint: View {
         Text(text)
             .font(AppTheme.Typography.secondary)
             .foregroundStyle(AppTheme.textSecondary)
-            .lineSpacing(2)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-/// Tinted info box (RN `ui.note`).
-struct SettingsNoteBox<Content: View>: View {
-    let content: Content
-
-    init(@ViewBuilder content: () -> Content) {
-        self.content = content()
-    }
-
-    var body: some View {
-        content
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(AppTheme.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(AppTheme.primary.opacity(0.15), lineWidth: 1)
-            )
     }
 }
 
@@ -120,235 +217,8 @@ struct SettingsStatusText: View {
     var body: some View {
         Text(text)
             .font(AppTheme.Typography.secondary)
-            .foregroundStyle(AppTheme.color(0x82CDB1))
+            .foregroundStyle(AppTheme.success)
             .fixedSize(horizontal: false, vertical: true)
-    }
-}
-
-/// One grouped row: optional icon, title/subtitle, value, chevron, spinner.
-struct SettingsRow: View {
-    let title: String
-    var subtitle: String? = nil
-    var systemImage: String? = nil
-    var value: String? = nil
-    var isDanger = false
-    var isLast = false
-    var isBusy = false
-    var showsDisclosure = false
-    var action: (() -> Void)? = nil
-
-    var body: some View {
-        Group {
-            if let action {
-                Button(action: action) {
-                    rowContent
-                }
-                .buttonStyle(.plain)
-                .disabled(isBusy)
-            } else {
-                rowContent
-            }
-        }
-        .overlay(alignment: .bottom) {
-            if !isLast {
-                Rectangle()
-                    .fill(AppTheme.divider)
-                    .frame(height: 1)
-                    .padding(.leading, 14)
-            }
-        }
-    }
-
-    private var rowContent: some View {
-        HStack(spacing: AppTheme.Spacing.item) {
-            if let systemImage {
-                Image(systemName: systemImage)
-                    .font(.system(size: AppTheme.Icon.small, weight: .semibold))
-                    .foregroundStyle(isDanger ? AppTheme.danger : AppTheme.primaryLight)
-                    .frame(width: 28, height: 28)
-                    .background(
-                        isDanger ? AppTheme.danger.opacity(0.06) : AppTheme.primary.opacity(0.07),
-                        in: RoundedRectangle(cornerRadius: 9)
-                    )
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(AppTheme.Typography.body)
-                    .fontWeight(.medium)
-                    .foregroundStyle(isDanger ? AppTheme.color(0xF28B94) : AppTheme.color(0xECEEF5))
-                if let subtitle {
-                    Text(subtitle)
-                        .font(AppTheme.Typography.secondary)
-                        .foregroundStyle(AppTheme.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-
-            Spacer(minLength: AppTheme.Spacing.item)
-
-            if isBusy {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(AppTheme.primaryLight)
-            } else {
-                if let value {
-                    Text(value)
-                        .font(AppTheme.Typography.secondary)
-                        .foregroundStyle(AppTheme.textSecondary)
-                        .lineLimit(1)
-                }
-                if action != nil || showsDisclosure {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(AppTheme.textMuted)
-                }
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, AppTheme.Spacing.rowVertical)
-        .frame(minHeight: AppTheme.Spacing.minimumHitTarget)
-        .contentShape(Rectangle())
-    }
-}
-
-/// Grouped row with a switch.
-struct SettingsToggleRow: View {
-    let title: String
-    var subtitle: String? = nil
-    var systemImage: String? = nil
-    let isOn: Bool
-    var isLast = false
-    var isBusy = false
-    let onChange: (Bool) -> Void
-
-    var body: some View {
-        HStack(spacing: AppTheme.Spacing.item) {
-            if let systemImage {
-                Image(systemName: systemImage)
-                    .font(.system(size: AppTheme.Icon.small, weight: .semibold))
-                    .foregroundStyle(AppTheme.primaryLight)
-                    .frame(width: 28, height: 28)
-                    .background(AppTheme.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(AppTheme.Typography.body)
-                    .fontWeight(.medium)
-                    .foregroundStyle(AppTheme.color(0xECEEF5))
-                if let subtitle {
-                    Text(subtitle)
-                        .font(AppTheme.Typography.secondary)
-                        .foregroundStyle(AppTheme.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-
-            Spacer(minLength: AppTheme.Spacing.item)
-
-            if isBusy {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(AppTheme.primaryLight)
-            } else {
-                Toggle("", isOn: Binding(get: { isOn }, set: onChange))
-                    .labelsHidden()
-                    .tint(AppTheme.primary)
-                    .accessibilityLabel(title)
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, AppTheme.Spacing.rowVertical)
-        .frame(minHeight: AppTheme.Spacing.minimumHitTarget)
-        .overlay(alignment: .bottom) {
-            if !isLast {
-                Rectangle()
-                    .fill(AppTheme.divider)
-                    .frame(height: 1)
-                    .padding(.leading, 14)
-            }
-        }
-    }
-}
-
-/// Primary / secondary / destructive action button (RN `SettingsButton`).
-struct SettingsActionButton: View {
-    let title: String
-    var isSecondary = false
-    var isDanger = false
-    var isBusy = false
-    var isDisabled = false
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Group {
-                if isBusy {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(AppTheme.textPrimary)
-                } else {
-                    Text(title)
-                        .font(AppTheme.Typography.body)
-                        .fontWeight(.semibold)
-                }
-            }
-            .foregroundStyle(isDanger ? AppTheme.color(0xF28B94) : AppTheme.textPrimary)
-            .frame(maxWidth: .infinity, minHeight: AppTheme.Spacing.minimumHitTarget)
-            .background(background, in: RoundedRectangle(cornerRadius: 10))
-        }
-        .buttonStyle(.plain)
-        .disabled(isDisabled || isBusy)
-        .opacity(isDisabled || isBusy ? 0.5 : 1)
-    }
-
-    private var background: Color {
-        if isDanger {
-            return AppTheme.danger.opacity(0.08)
-        }
-        return isSecondary ? AppTheme.color(0x282D40) : AppTheme.primary
-    }
-}
-
-/// Labeled text field used inside forms.
-struct SettingsField: View {
-    let label: String
-    var placeholder: String = ""
-    @Binding var text: String
-    var isSecure = false
-    var isNumeric = false
-    var isURL = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(label)
-                .font(AppTheme.Typography.secondary)
-                .fontWeight(.semibold)
-                .foregroundStyle(AppTheme.color(0xC0C3D0))
-
-            Group {
-                if isSecure {
-                    SecureField(placeholder, text: $text)
-                } else {
-                    TextField(placeholder, text: $text)
-                }
-            }
-            .font(AppTheme.Typography.body)
-            .foregroundStyle(AppTheme.textPrimary)
-            .tint(AppTheme.primaryLight)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .keyboardType(isNumeric ? .numberPad : (isURL ? .URL : .default))
-            .padding(.horizontal, 12)
-            .frame(minHeight: AppTheme.Spacing.minimumHitTarget)
-            .background(AppTheme.color(0x10121B), in: RoundedRectangle(cornerRadius: 10))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(AppTheme.color(0x2A2E40), lineWidth: 1)
-            )
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -367,6 +237,7 @@ struct SourceMarkBadge: View {
                 Circle()
                     .stroke(AppTheme.color(entry.colorHex, opacity: 0.35), lineWidth: 1)
             )
+            .accessibilityHidden(true)
     }
 }
 
@@ -377,22 +248,18 @@ struct SourcesSettingsView: View {
     let model: SettingsViewModel
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: AppTheme.Spacing.section) {
-                SettingsPageIntro(text: "Switch with a tap. Use the settings icon for account & API options.")
-
-                SettingsSection(title: "All sources") {
-                    ForEach(entries) { entry in
-                        sourceRow(entry, isLast: entry.id == entries.last?.id)
-                    }
+        Form {
+            Section {
+                ForEach(entries) { entry in
+                    sourceRow(entry)
                 }
-
+            } header: {
+                Text("All sources")
+            } footer: {
                 SettingsHint(text: "Keys are saved on this device only. Each source needs its own key.")
             }
-            .padding(.horizontal, AppTheme.Spacing.screenHorizontal)
-            .padding(.vertical, AppTheme.Spacing.section)
         }
-        .background(AppTheme.background.ignoresSafeArea())
+        .listStyle(.insetGrouped)
         .navigationTitle("Sources & API Keys")
         .navigationBarTitleDisplayMode(.inline)
         .settingsAlert(model)
@@ -402,7 +269,8 @@ struct SourcesSettingsView: View {
         SourceSheetView.visibleCatalog
     }
 
-    private func sourceRow(_ entry: SourceSheetView.Entry, isLast: Bool) -> some View {
+    /// Tap the row to switch source; the trailing gear pushes that source's detail page.
+    private func sourceRow(_ entry: SourceSheetView.Entry) -> some View {
         let isActive = entry.id == model.activeSourceID
 
         return HStack(spacing: AppTheme.Spacing.item) {
@@ -410,7 +278,7 @@ struct SourcesSettingsView: View {
                 Task { await model.selectSource(entry.id) }
             } label: {
                 HStack(spacing: AppTheme.Spacing.item) {
-                    SourceMarkBadge(entry: entry, size: 34)
+                    SourceMarkBadge(entry: entry, size: 30)
 
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
@@ -418,19 +286,14 @@ struct SourcesSettingsView: View {
                                 .font(AppTheme.Typography.body)
                                 .fontWeight(.semibold)
                                 .foregroundStyle(AppTheme.textPrimary)
+
                             if isActive {
                                 Text("ACTIVE")
-                                    .font(.system(.caption2, weight: .heavy))
-                                    .kerning(0.7)
-                                    .foregroundStyle(AppTheme.primaryLight)
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 1)
-                                    .background(
-                                        AppTheme.primary.opacity(0.12),
-                                        in: RoundedRectangle(cornerRadius: 4)
-                                    )
+                                    .font(AppTheme.Typography.caption)
+                                    .foregroundStyle(AppTheme.primary)
                             }
                         }
+
                         Text("\(entry.kind) • \(entry.host)")
                             .font(AppTheme.Typography.caption)
                             .foregroundStyle(AppTheme.textSecondary)
@@ -439,40 +302,31 @@ struct SourcesSettingsView: View {
 
                     Spacer(minLength: 0)
                 }
-                // The source row paints at 34 pt; the 44 pt frame is the row's own tap lane.
                 .frame(minHeight: AppTheme.Spacing.minimumHitTarget)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            // Borderless keeps the row's two tap targets independent: the switch button and
+            // the gear link each own their bounds instead of the whole row.
+            .buttonStyle(.borderless)
             .disabled(model.busy == .source)
+            .accessibilityLabel(isActive ? "\(entry.name), active source" : "Use \(entry.name)")
+            .accessibilityAddTraits(isActive ? [.isSelected] : [])
 
             NavigationLink {
                 SourceDetailSettingsView(source: entry.id, model: model)
             } label: {
                 Image(systemName: "gearshape")
                     .font(.system(size: AppTheme.Icon.small, weight: .semibold))
-                    .foregroundStyle(AppTheme.textSecondary)
-                    .frame(width: 28, height: 28)
-                    .background(AppTheme.surface, in: RoundedRectangle(cornerRadius: 9))
-                    // Real layout, not a painted overlay: the gear owns a 44 pt target while the
-                    // 28 pt badge above stays visually compact.
+                    .foregroundStyle(AppTheme.primary)
+                    // Real layout, not a painted overlay: the gear owns a 44 pt target.
                     .frame(
                         minWidth: AppTheme.Spacing.minimumHitTarget,
                         minHeight: AppTheme.Spacing.minimumHitTarget
                     )
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             .accessibilityLabel("\(entry.name) settings")
-        }
-        .padding(.horizontal, 14)
-        .overlay(alignment: .bottom) {
-            if !isLast {
-                Rectangle()
-                    .fill(AppTheme.divider)
-                    .frame(height: 1)
-                    .padding(.leading, 56)
-            }
         }
     }
 }
@@ -494,133 +348,180 @@ struct SourceDetailSettingsView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: AppTheme.Spacing.section) {
+        Form {
+            Section {
                 hero
+            }
 
-                if KeychainStore.authAccount(for: source) != nil {
-                    authSection
-                } else {
-                    SettingsNoteBox {
-                        SettingsHint(text: "No manual API key is needed for this source. Connection preferences apply across all sources.")
-                    }
+            // The switch action lives in its own native row, not inside the hero block:
+            // otherwise the whole hero would be one huge tap target.
+            if model.activeSourceID != source {
+                Section {
+                    SettingsActionButton(
+                        title: "Use \(entry.name)",
+                        isBusy: model.busy == .source,
+                        action: { Task { await model.selectSource(source) } }
+                    )
                 }
+            }
 
-                SettingsSection(title: "Source details") {
+            if KeychainStore.authAccount(for: source) != nil {
+                authSection
+            } else {
+                Section {
+                    Label("No manual API key needed", systemImage: "checkmark.shield")
+                        .font(AppTheme.Typography.body)
+                        .foregroundStyle(AppTheme.textSecondary)
+                } footer: {
+                    SettingsHint(text: "Connection preferences apply across all sources.")
+                }
+            }
+
+            Section("Source details") {
+                Button {
+                    openWebsite()
+                } label: {
                     SettingsRow(
                         title: "Website",
                         subtitle: entry.host,
-                        systemImage: "globe",
-                        showsDisclosure: true,
-                        action: { openWebsite() }
+                        systemImage: "globe"
                     )
-                    NavigationLink {
-                        NetworkSettingsView(model: model)
-                    } label: {
-                        SettingsRow(
-                            title: "Connection settings",
-                            subtitle: "App-wide relay & connection diagnostics",
-                            systemImage: "antenna.radiowaves.left.and.right",
-                            isLast: true,
-                            showsDisclosure: true
-                        )
-                    }
-                    .buttonStyle(.plain)
+                }
+
+                NavigationLink {
+                    NetworkSettingsView(model: model)
+                } label: {
+                    SettingsRow(
+                        title: "Connection settings",
+                        subtitle: "App-wide relay & connection diagnostics",
+                        systemImage: "antenna.radiowaves.left.and.right"
+                    )
                 }
             }
-            .padding(.horizontal, AppTheme.Spacing.screenHorizontal)
-            .padding(.vertical, AppTheme.Spacing.section)
         }
-        .background(AppTheme.background.ignoresSafeArea())
+        .listStyle(.insetGrouped)
         .navigationTitle(entry.name)
         .navigationBarTitleDisplayMode(.inline)
         .settingsAlert(model)
     }
 
+    /// Non-interactive source identity. The switch action is a separate row in `body`, so the
+    /// hero itself is pure metadata and cannot swallow taps.
     private var hero: some View {
         let isActive = model.activeSourceID == source
 
         return VStack(alignment: .center, spacing: AppTheme.Spacing.item) {
             SourceMarkBadge(entry: entry, size: 56)
+
             Text(entry.name)
                 .font(AppTheme.Typography.screenTitle)
                 .foregroundStyle(AppTheme.textPrimary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
+
             Text("\(entry.kind) source")
                 .font(AppTheme.Typography.secondary)
                 .foregroundStyle(AppTheme.textSecondary)
+
             Text(Self.description(for: source))
                 .font(AppTheme.Typography.secondary)
-                .foregroundStyle(AppTheme.color(0x9CA1B8))
+                .foregroundStyle(AppTheme.textSecondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 12)
 
             if isActive {
-                HStack(spacing: 5) {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 11, weight: .bold))
-                    Text("Your current source")
-                        .font(AppTheme.Typography.secondary)
-                }
-                .foregroundStyle(AppTheme.color(0xA6ACFF))
-                .padding(.vertical, 6)
-            } else {
-                SettingsActionButton(
-                    title: "Use \(entry.name)",
-                    isBusy: model.busy == .source,
-                    action: { Task { await model.selectSource(source) } }
-                )
-                .padding(.top, 2)
+                Label("Your current source", systemImage: "checkmark")
+                    .font(AppTheme.Typography.secondary)
+                    .foregroundStyle(AppTheme.primary)
             }
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 6)
     }
 
     private var authSection: some View {
+        @Bindable var model = model
         let isRule34 = source == .rule34
+        let saved = model.savedAuth(for: source)
+        let hasAnyKey = !model.auth(for: source).apiKey.isEmpty
+            || !model.auth(for: source).userID.isEmpty
+            || !saved.apiKey.isEmpty
 
-        return SettingsSection(
-            title: "Account & API",
-            hint: "Keys are saved on this device. Each source needs its own key. Refresh your feed after saving."
-        ) {
-            VStack(alignment: .leading, spacing: AppTheme.Spacing.section) {
-                HStack(spacing: AppTheme.Spacing.item) {
-                    Image(systemName: "key")
-                        .font(.system(size: AppTheme.Icon.standard, weight: .semibold))
-                        .foregroundStyle(AppTheme.color(0xA0A7F5))
-                    Text(isRule34 ? "API key required" : "Connect your account")
-                        .font(AppTheme.Typography.body)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(AppTheme.color(0xE5E7F0))
-                }
+        // Every statement is a direct child of the `Section` builder, so each control gets
+        // its own native row instead of sharing one.
+        return Section {
+            HStack(spacing: AppTheme.Spacing.item) {
+                Image(systemName: "key")
+                    .font(.system(size: AppTheme.Icon.standard, weight: .semibold))
+                    .foregroundStyle(AppTheme.primary)
+                    .accessibilityHidden(true)
 
-                SettingsHint(
-                    text: isRule34
-                        ? "Rule34 requires your user ID and API key to load posts."
-                        : "A Gelbooru API key enables DAPI access and higher request limits."
-                )
+                Text(isRule34 ? "API key required" : "Connect your account")
+                    .font(AppTheme.Typography.body)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(AppTheme.textPrimary)
 
-                if let accountURL = URL(string: accountURLString) {
-                    Link(destination: accountURL) {
-                        HStack(spacing: 4) {
-                            Text("Get your API key")
-                                .font(AppTheme.Typography.secondary)
-                                .fontWeight(.medium)
-                            Image(systemName: "arrow.up.right")
-                                .font(.system(size: 10, weight: .semibold))
-                        }
-                        .foregroundStyle(AppTheme.color(0xA6ACFF))
-                        .padding(.vertical, 4)
-                        .contentShape(Rectangle())
+                Spacer(minLength: 0)
+            }
+
+            SettingsHint(
+                text: isRule34
+                    ? "Rule34 requires your user ID and API key to load posts."
+                    : "A Gelbooru API key enables DAPI access and higher request limits."
+            )
+
+            if let accountURL = URL(string: accountURLString) {
+                Link(destination: accountURL) {
+                    HStack(spacing: 4) {
+                        Text("Get your API key")
+                            .font(AppTheme.Typography.body)
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: 10, weight: .semibold))
                     }
                 }
-
-                ApiAuthForm(model: model, source: source)
             }
-            .padding(14)
+
+            SettingsField(
+                label: "User ID",
+                placeholder: isRule34 ? "Rule34 user_id" : "Gelbooru user_id",
+                text: isRule34 ? $model.rule34Auth.userID : $model.gelbooruAuth.userID,
+                isNumeric: true
+            )
+
+            SettingsField(
+                label: "API key",
+                placeholder: isRule34 ? "Rule34 api_key" : "Gelbooru api_key",
+                text: isRule34 ? $model.rule34Auth.apiKey : $model.gelbooruAuth.apiKey,
+                isSecure: true
+            )
+
+            SettingsActionButton(
+                title: "Save",
+                isBusy: model.busy == .auth,
+                isDisabled: model.busy != nil,
+                action: { Task { await model.saveAuth(for: source) } }
+            )
+
+            if hasAnyKey {
+                SettingsActionButton(
+                    title: "Delete Key",
+                    isSecondary: true,
+                    isDanger: true,
+                    isDisabled: model.busy != nil,
+                    action: { Task { await model.clearAuth(for: source) } }
+                )
+            }
+        } header: {
+            Text("Account & API")
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                SettingsHint(text: "Keys are saved on this device. Each source needs its own key. Refresh your feed after saving.")
+
+                if model.isAuthSaved(for: source) {
+                    SettingsStatusText(
+                        text: "Saved — \(isRule34 ? "Rule34" : "Gelbooru") requests use your key"
+                    )
+                }
+            }
         }
     }
 
@@ -658,191 +559,71 @@ struct SourceDetailSettingsView: View {
     }
 }
 
-/// Credentials editor for the two sources that support API auth.
-private struct ApiAuthForm: View {
-    let model: SettingsViewModel
-    let source: SourceID
-
-    var body: some View {
-        @Bindable var model = model
-        let isRule34 = source == .rule34
-        let saved = model.savedAuth(for: source)
-
-        VStack(alignment: .leading, spacing: AppTheme.Spacing.section) {
-            SettingsField(
-                label: "User ID",
-                placeholder: isRule34 ? "Rule34 user_id" : "Gelbooru user_id",
-                text: isRule34 ? $model.rule34Auth.userID : $model.gelbooruAuth.userID,
-                isNumeric: true
-            )
-
-            SettingsField(
-                label: "API key",
-                placeholder: isRule34 ? "Rule34 api_key" : "Gelbooru api_key",
-                text: isRule34 ? $model.rule34Auth.apiKey : $model.gelbooruAuth.apiKey,
-                isSecure: true
-            )
-
-            HStack(spacing: AppTheme.Spacing.item) {
-                SettingsActionButton(
-                    title: "Save",
-                    isBusy: model.busy == .auth,
-                    isDisabled: model.busy != nil,
-                    action: { Task { await model.saveAuth(for: source) } }
-                )
-
-                let hasAnyKey = !model.auth(for: source).apiKey.isEmpty
-                    || !model.auth(for: source).userID.isEmpty
-                    || !saved.apiKey.isEmpty
-                if hasAnyKey {
-                    SettingsActionButton(
-                        title: "Delete Key",
-                        isSecondary: true,
-                        isDanger: true,
-                        isDisabled: model.busy != nil,
-                        action: { Task { await model.clearAuth(for: source) } }
-                    )
-                }
-            }
-
-            if model.isAuthSaved(for: source) {
-                SettingsStatusText(
-                    text: "Saved — \(isRule34 ? "Rule34" : "Gelbooru") requests use your key"
-                )
-            }
-        }
-    }
-}
-
 // MARK: - Appearance & playback
 
-/// Image quality radios plus the video-preview switch (RN `renderAppearance`).
+/// Image quality picker plus the video-preview switch (RN `renderAppearance`).
 struct AppearanceSettingsView: View {
     let model: SettingsViewModel
 
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: AppTheme.Spacing.section) {
-                SettingsPageIntro(text: "Image quality and motion preferences.")
+    private var selectedOption: SettingsViewModel.QualityOption? {
+        SettingsViewModel.qualityOptions.first { $0.id == model.settings.imageQuality }
+    }
 
-                SettingsSection(
-                    title: "Image quality",
-                    hint: "Applies to images in the viewer. Original files can use considerably more data."
-                ) {
-                    let options = SettingsViewModel.qualityOptions
-                    ForEach(options) { option in
-                        QualityChoiceRow(
-                            option: option,
-                            isSelected: model.settings.imageQuality == option.id,
-                            isDisabled: model.busy != nil,
-                            isLast: option.id == options.last?.id,
-                            action: { Task { await model.setImageQuality(option.id) } }
-                        )
+    var body: some View {
+        Form {
+            Section {
+                Picker("Quality", selection: qualityBinding) {
+                    ForEach(SettingsViewModel.qualityOptions) { option in
+                        Text(option.name).tag(option.id)
                     }
                 }
-
-                SettingsSection(
-                    title: "Motion",
-                    hint: "Turn off previews for quieter browsing, less data usage and fewer active video players."
-                ) {
-                    SettingsToggleRow(
-                        title: "Video previews",
-                        subtitle: model.settings.gridPreviews
-                            ? "Play previews on visible cards"
-                            : "Show static covers only",
-                        systemImage: "photo",
-                        isOn: model.settings.gridPreviews,
-                        isLast: true,
-                        isBusy: model.busy == .previews,
-                        onChange: { value in Task { await model.setGridPreviews(value) } }
-                    )
+                .disabled(model.busy != nil)
+            } header: {
+                Text("Image quality")
+            } footer: {
+                VStack(alignment: .leading, spacing: 4) {
+                    if let selectedOption {
+                        SettingsHint(text: selectedOption.description)
+                    }
+                    SettingsHint(text: "Applies to images in the viewer. Original files can use considerably more data.")
                 }
             }
-            .padding(.horizontal, AppTheme.Spacing.screenHorizontal)
-            .padding(.vertical, AppTheme.Spacing.section)
+
+            Section {
+                SettingsToggleRow(
+                    title: "Video previews",
+                    subtitle: model.settings.gridPreviews
+                        ? "Play previews on visible cards"
+                        : "Show static covers only",
+                    systemImage: "photo",
+                    isOn: model.settings.gridPreviews,
+                    isBusy: model.busy == .previews,
+                    onChange: { value in Task { await model.setGridPreviews(value) } }
+                )
+            } header: {
+                Text("Motion")
+            } footer: {
+                SettingsHint(text: "Turn off previews for quieter browsing, less data usage and fewer active video players.")
+            }
         }
-        .background(AppTheme.background.ignoresSafeArea())
+        .listStyle(.insetGrouped)
         .navigationTitle("Viewing")
         .navigationBarTitleDisplayMode(.inline)
         .settingsAlert(model)
     }
-}
 
-private struct QualityChoiceRow: View {
-    let option: SettingsViewModel.QualityOption
-    let isSelected: Bool
-    let isDisabled: Bool
-    let isLast: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: AppTheme.Spacing.item) {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(option.name)
-                            .font(AppTheme.Typography.body)
-                            .fontWeight(.semibold)
-                            .foregroundStyle(AppTheme.color(0xE5E7F0))
-                        if option.id == .auto {
-                            Text("RECOMMENDED")
-                                .font(.system(.caption2, weight: .bold))
-                                .kerning(0.5)
-                                .foregroundStyle(AppTheme.color(0xA5ABEA))
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(
-                                    AppTheme.primary.opacity(0.07),
-                                    in: RoundedRectangle(cornerRadius: 4)
-                                )
-                        }
-                    }
-                    Text(option.description)
-                        .font(AppTheme.Typography.secondary)
-                        .foregroundStyle(AppTheme.color(0x959BB2))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                Spacer(minLength: AppTheme.Spacing.item)
-
-                ZStack {
-                    Circle()
-                        .stroke(
-                            isSelected ? AppTheme.primary : AppTheme.color(0x363C52),
-                            lineWidth: 1.5
-                        )
-                        .frame(width: 19, height: 19)
-                    if isSelected {
-                        Circle()
-                            .fill(AppTheme.primary)
-                            .frame(width: 19, height: 19)
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(Color.white)
-                    }
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, AppTheme.Spacing.rowVertical)
-            .frame(minHeight: AppTheme.Spacing.minimumHitTarget)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(isDisabled)
-        .overlay(alignment: .bottom) {
-            if !isLast {
-                Rectangle()
-                    .fill(AppTheme.divider)
-                    .frame(height: 1)
-                    .padding(.leading, 14)
-            }
-        }
+    /// `setImageQuality` persists and rolls back on failure, so the draft write is async only.
+    private var qualityBinding: Binding<ImageQuality> {
+        Binding(
+            get: { model.settings.imageQuality },
+            set: { value in Task { await model.setImageQuality(value) } }
+        )
     }
 }
 
 // MARK: - Blocked tags
 
-/// Tag editor for the blacklist (RN privacy page tag chips plus manual entry).
+/// Tag editor for the blacklist (RN privacy page plus manual entry).
 struct BlacklistSettingsView: View {
     let model: SettingsViewModel
 
@@ -855,91 +636,78 @@ struct BlacklistSettingsView: View {
     var body: some View {
         @Bindable var model = model
 
-        ScrollView {
-            VStack(alignment: .leading, spacing: AppTheme.Spacing.section) {
-                SettingsPageIntro(text: "Posts with these tags are hidden from feeds and search.")
+        Form {
+            Section {
+                HStack(spacing: AppTheme.Spacing.item) {
+                    TextField("Add a tag to block...", text: $model.newBlacklistTag)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .submitLabel(.done)
+                        .onSubmit { submitTag() }
+                        .accessibilityLabel("New blocked tag")
 
-                SettingsSection(
-                    title: "Blocked tags — \(model.blacklistedTags.count)",
-                    hint: "Tags are normalized to lowercase with underscores between words."
-                ) {
-                    VStack(alignment: .leading, spacing: AppTheme.Spacing.section) {
-                        HStack(spacing: AppTheme.Spacing.item) {
-                            TextField("Add a tag to block...", text: $model.newBlacklistTag)
+                    Button {
+                        submitTag()
+                    } label: {
+                        Text("Block")
+                            // The 44 pt target is *inside* the label, so the button's own hit
+                            // shape reaches 44 x 44. An outer `.frame` would only widen the
+                            // HStack slot while the tappable label stayed text-sized.
+                            .frame(
+                                minWidth: AppTheme.Spacing.minimumHitTarget,
+                                minHeight: AppTheme.Spacing.minimumHitTarget
+                            )
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(
+                        model.busy == .tag
+                            || model.newBlacklistTag.trimmingCharacters(in: .whitespaces).isEmpty
+                    )
+                }
+
+                if model.blacklistedTags.isEmpty {
+                    HStack(spacing: AppTheme.Spacing.item) {
+                        Image(systemName: "eye.slash")
+                            .foregroundStyle(AppTheme.textMuted)
+                            .accessibilityHidden(true)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Nothing blocked")
                                 .font(AppTheme.Typography.body)
                                 .foregroundStyle(AppTheme.textPrimary)
-                                .tint(AppTheme.primaryLight)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .submitLabel(.done)
-                                .onSubmit { submitTag() }
-                                .padding(.horizontal, 12)
-                                .frame(minHeight: AppTheme.Spacing.minimumHitTarget)
-                                .background(
-                                    AppTheme.color(0x10121B),
-                                    in: RoundedRectangle(cornerRadius: 10)
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 10)
-                                        .stroke(AppTheme.color(0x2A2E40), lineWidth: 1)
-                                )
-
-                            SettingsActionButton(
-                                title: "Block",
-                                isBusy: model.busy == .tag,
-                                isDisabled: model.newBlacklistTag.trimmingCharacters(in: .whitespaces).isEmpty,
-                                action: { submitTag() }
-                            )
-                            .frame(width: 88)
+                            Text("Your blocked tags will appear here.")
+                                .font(AppTheme.Typography.secondary)
+                                .foregroundStyle(AppTheme.textSecondary)
                         }
 
-                        if model.blacklistedTags.isEmpty {
-                            HStack(spacing: AppTheme.Spacing.item) {
-                                Image(systemName: "eye.slash")
-                                    .font(.system(size: AppTheme.Icon.standard))
-                                    .foregroundStyle(AppTheme.textMuted)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Nothing blocked")
-                                        .font(AppTheme.Typography.body)
-                                        .fontWeight(.medium)
-                                        .foregroundStyle(AppTheme.color(0xD9DCE9))
-                                    Text("Your blocked tags will appear here.")
-                                        .font(AppTheme.Typography.secondary)
-                                        .foregroundStyle(AppTheme.textSecondary)
-                                }
-                            }
-                            .padding(.vertical, 6)
-                        } else {
-                            FlexibleTagFlow(tags: model.blacklistedTags) { tag in
-                                Task { await model.removeBlacklistedTag(tag) }
-                            }
-                        }
+                        Spacer(minLength: 0)
                     }
-                    .padding(12)
+                } else {
+                    ForEach(model.blacklistedTags, id: \.self) { tag in
+                        tagRow(tag)
+                    }
                 }
+            } header: {
+                Text("Blocked tags — \(model.blacklistedTags.count)")
+            } footer: {
+                SettingsHint(text: "Posts with these tags are hidden from feeds and search. Tags are normalized to lowercase with underscores between words.")
+            }
 
-                if !model.blacklistedTags.isEmpty {
-                    SettingsSection(title: "Cleanup") {
-                        SettingsRow(
-                            title: "Clear blocked tags",
-                            subtitle: "Posts with these tags will no longer be hidden",
-                            systemImage: "trash",
-                            isDanger: true,
-                            isLast: true,
-                            isBusy: model.busy == .tag,
-                            action: { isConfirmingClear = true }
-                        )
+            if !model.blacklistedTags.isEmpty {
+                Section("Cleanup") {
+                    Button("Clear blocked tags", role: .destructive) {
+                        isConfirmingClear = true
                     }
+                    .disabled(model.busy == .tag)
                 }
             }
-            .padding(.horizontal, AppTheme.Spacing.screenHorizontal)
-            .padding(.vertical, AppTheme.Spacing.section)
         }
-        .background(AppTheme.background.ignoresSafeArea())
+        .listStyle(.insetGrouped)
         .navigationTitle("Blacklist")
         .navigationBarTitleDisplayMode(.inline)
-        .task { await model.refreshBlacklist() }
         .settingsAlert(model)
+        .task { await model.refreshBlacklist() }
         .confirmationDialog(
             "Clear blocked tags?",
             isPresented: $isConfirmingClear,
@@ -954,53 +722,36 @@ struct BlacklistSettingsView: View {
         }
     }
 
+    /// One blocked tag: the tag name plus a native destructive remove control.
+    private func tagRow(_ tag: String) -> some View {
+        HStack(spacing: AppTheme.Spacing.item) {
+            Text(tag)
+                .font(AppTheme.Typography.body)
+                .foregroundStyle(AppTheme.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            Spacer(minLength: 0)
+
+            Button {
+                Task { await model.removeBlacklistedTag(tag) }
+            } label: {
+                Image(systemName: "minus.circle.fill")
+                    .font(.system(size: AppTheme.Icon.standard))
+                    .foregroundStyle(AppTheme.danger)
+                    .frame(
+                        minWidth: AppTheme.Spacing.minimumHitTarget,
+                        minHeight: AppTheme.Spacing.minimumHitTarget
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Unblock \(tag)")
+        }
+    }
+
     private func submitTag() {
         Task { await model.addBlacklistedTag() }
-    }
-}
-
-/// Wrapping tag chips with a remove control; keeps the RN chip look.
-private struct FlexibleTagFlow: View {
-    let tags: [String]
-    let onRemove: (String) -> Void
-
-    private let columns = [GridItem(.adaptive(minimum: 110), spacing: AppTheme.Spacing.item)]
-
-    var body: some View {
-        LazyVGrid(columns: columns, alignment: .leading, spacing: AppTheme.Spacing.item) {
-            ForEach(tags, id: \.self) { tag in
-                HStack(spacing: 2) {
-                    Text(tag)
-                        .font(AppTheme.Typography.secondary)
-                        .foregroundStyle(AppTheme.color(0xD2D6E7))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    Button {
-                        onRemove(tag)
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(AppTheme.color(0xC5C8D5))
-                            // The remove control now spends real layout on a 44 x 44 target.
-                            // Only the pill's background is inset vertically, so the painted
-                            // chip stays compact while the tap area is fully allocated.
-                            .frame(
-                                minWidth: AppTheme.Spacing.minimumHitTarget,
-                                minHeight: AppTheme.Spacing.minimumHitTarget
-                            )
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Unblock \(tag)")
-                }
-                .padding(.leading, AppTheme.Spacing.chipHorizontal)
-                .background(
-                    RoundedRectangle(cornerRadius: 9)
-                        .fill(AppTheme.color(0x252A3C))
-                        .padding(.vertical, 5)
-                )
-            }
-        }
     }
 }
 
@@ -1017,78 +768,71 @@ struct AppLockSettingsView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: AppTheme.Spacing.section) {
-                SettingsPageIntro(text: "Control access to the app and what appears in your feed.")
+        Form {
+            Section {
+                SettingsToggleRow(
+                    title: "Passcode lock",
+                    subtitle: model.passcodeEnabled ? "PIN protection enabled" : "Not enabled",
+                    systemImage: "lock",
+                    isOn: model.passcodeEnabled,
+                    isBusy: model.busy == .passcode,
+                    onChange: { enabled in
+                        passcodeMode = enabled ? .setup : .disable
+                    }
+                )
 
-                SettingsSection(
-                    title: "App lock",
-                    hint: "A four-digit PIN protects the app when you open it or return from the background."
-                ) {
+                if model.passcodeEnabled {
+                    if model.hasBiometrics {
+                        SettingsToggleRow(
+                            title: "Unlock with biometrics",
+                            subtitle: "Your PIN remains available as a fallback",
+                            isOn: model.settings.security.useBiometrics,
+                            isBusy: model.busy == .biometrics,
+                            onChange: { value in Task { await model.setUseBiometrics(value) } }
+                        )
+                    }
+
                     SettingsToggleRow(
-                        title: "Passcode lock",
-                        subtitle: model.passcodeEnabled ? "PIN protection enabled" : "Not enabled",
-                        systemImage: "lock",
-                        isOn: model.passcodeEnabled,
-                        isLast: !model.passcodeEnabled,
+                        title: "Lock when app leaves foreground",
+                        subtitle: "Requires the PIN again after switching apps",
+                        isOn: model.settings.security.autoLockImmediately,
                         isBusy: model.busy == .passcode,
-                        onChange: { enabled in
-                            passcodeMode = enabled ? .setup : .disable
-                        }
+                        onChange: { value in Task { await model.setAutoLockImmediately(value) } }
                     )
 
-                    if model.passcodeEnabled {
-                        if model.hasBiometrics {
-                            SettingsToggleRow(
-                                title: "Unlock with biometrics",
-                                subtitle: "Your PIN remains available as a fallback",
-                                isOn: model.settings.security.useBiometrics,
-                                isBusy: model.busy == .biometrics,
-                                onChange: { value in Task { await model.setUseBiometrics(value) } }
-                            )
-                        }
-
-                        SettingsToggleRow(
-                            title: "Lock when app leaves foreground",
-                            subtitle: "Requires the PIN again after switching apps",
-                            isOn: model.settings.security.autoLockImmediately,
-                            isBusy: model.busy == .passcode,
-                            onChange: { value in Task { await model.setAutoLockImmediately(value) } }
-                        )
-
-                        SettingsRow(
-                            title: "Change passcode",
-                            subtitle: "Verify the current PIN, then set a new one",
-                            isLast: true,
-                            showsDisclosure: true,
-                            action: { passcodeMode = .change }
-                        )
-                    }
-                }
-
-                SettingsSection(title: "Blocked tags") {
-                    NavigationLink {
-                        BlacklistSettingsView(model: model)
+                    Button {
+                        passcodeMode = .change
                     } label: {
                         SettingsRow(
-                            title: "Blocked tags",
-                            subtitle: model.blacklistedTags.isEmpty
-                                ? "Nothing blocked yet"
-                                : "\(model.blacklistedTags.count) hidden tag\(model.blacklistedTags.count == 1 ? "" : "s")",
-                            systemImage: "eye.slash",
-                            isLast: true,
-                            showsDisclosure: true
+                            title: "Change passcode",
+                            subtitle: "Verify the current PIN, then set a new one"
                         )
                     }
-                    .buttonStyle(.plain)
                 }
-
-                SettingsHint(text: "The PIN is stored as a salted hash in the Keychain. Only the hash leaves the settings document, and only as a migration placeholder.")
+            } header: {
+                Text("App lock")
+            } footer: {
+                VStack(alignment: .leading, spacing: 4) {
+                    SettingsHint(text: "Control access to the app and what appears in your feed. A four-digit PIN protects the app when you open it or return from the background.")
+                    SettingsHint(text: "The PIN is stored as a salted hash in the Keychain. Only the hash leaves the settings document, and only as a migration placeholder.")
+                }
             }
-            .padding(.horizontal, AppTheme.Spacing.screenHorizontal)
-            .padding(.vertical, AppTheme.Spacing.section)
+
+            Section("Blocked tags") {
+                NavigationLink {
+                    BlacklistSettingsView(model: model)
+                } label: {
+                    SettingsRow(
+                        title: "Blocked tags",
+                        subtitle: model.blacklistedTags.isEmpty
+                            ? "Nothing blocked yet"
+                            : "\(model.blacklistedTags.count) hidden tag\(model.blacklistedTags.count == 1 ? "" : "s")",
+                        systemImage: "eye.slash"
+                    )
+                }
+            }
         }
-        .background(AppTheme.background.ignoresSafeArea())
+        .listStyle(.insetGrouped)
         .navigationTitle("Privacy & safety")
         .navigationBarTitleDisplayMode(.inline)
         .settingsAlert(model)
@@ -1106,7 +850,7 @@ struct AppLockSettingsView: View {
 
 // MARK: - Backup & restore
 
-/// Export / import page wired to `fileExporter` and `fileImporter` on the settings screen.
+/// Export / import page wired to `fileExporter` and `fileImporter`.
 struct BackupSettingsView: View {
     let model: SettingsViewModel
 
@@ -1120,61 +864,63 @@ struct BackupSettingsView: View {
     var body: some View {
         @Bindable var model = model
 
-        ScrollView {
-            VStack(alignment: .leading, spacing: AppTheme.Spacing.section) {
-                SettingsPageIntro(text: "Back up your library and manage local data.")
-
-                SettingsSection(
-                    title: "Backup & transfer",
-                    hint: "Supports AnimeBoxes (.abbj) and JSON files. Export your favorites and tags before moving to another device."
-                ) {
+        Form {
+            Section {
+                Button {
+                    model.isImporting = true
+                } label: {
                     SettingsRow(
                         title: "Import backup",
                         subtitle: "Choose an .abbj or JSON file",
-                        systemImage: "square.and.arrow.down",
-                        isBusy: model.busy == .importBackup,
-                        action: { model.isImporting = true }
+                        systemImage: "square.and.arrow.down"
                     )
+                }
+                .disabled(model.busy == .importBackup)
 
+                Button {
+                    Task { await model.prepareExport() }
+                } label: {
                     SettingsRow(
                         title: "Export library",
                         subtitle: "Save a JSON backup of favorites, tags and history",
-                        systemImage: "square.and.arrow.up",
-                        isLast: true,
-                        isBusy: model.busy == .exportBackup,
-                        action: { Task { await model.prepareExport() } }
+                        systemImage: "square.and.arrow.up"
                     )
                 }
+                .disabled(model.busy == .exportBackup)
+            } header: {
+                Text("Backup & transfer")
+            } footer: {
+                SettingsHint(text: "Supports AnimeBoxes (.abbj) and JSON files. Export your favorites and tags before moving to another device. Imports always merge: existing favorites are kept and favorites, tags and history are deduplicated.")
+            }
 
-                SettingsSection(
-                    title: "Free up space",
-                    hint: "These actions do not delete your favorites, API keys or preferences."
-                ) {
+            Section {
+                Button {
+                    isConfirmingCacheClear = true
+                } label: {
                     SettingsRow(
                         title: "Clear media cache",
                         subtitle: "Thumbnails & temporary post data",
-                        systemImage: "externaldrive",
-                        action: { isConfirmingCacheClear = true }
+                        systemImage: "externaldrive"
                     )
+                }
 
+                Button {
+                    isConfirmingHistoryClear = true
+                } label: {
                     SettingsRow(
                         title: "Clear search history",
                         subtitle: "Remove searches saved on this device",
                         systemImage: "trash",
-                        isDanger: true,
-                        isLast: true,
-                        action: { isConfirmingHistoryClear = true }
+                        isDanger: true
                     )
                 }
-
-                SettingsNoteBox {
-                    SettingsHint(text: "Imports always merge: existing favorites are kept and favorites, tags and history are deduplicated.")
-                }
+            } header: {
+                Text("Free up space")
+            } footer: {
+                SettingsHint(text: "These actions do not delete your favorites, API keys or preferences.")
             }
-            .padding(.horizontal, AppTheme.Spacing.screenHorizontal)
-            .padding(.vertical, AppTheme.Spacing.section)
         }
-        .background(AppTheme.background.ignoresSafeArea())
+        .listStyle(.insetGrouped)
         .navigationTitle("Storage & backup")
         .navigationBarTitleDisplayMode(.inline)
         .settingsAlert(model)
@@ -1221,78 +967,55 @@ struct BackupSettingsView: View {
 
 // MARK: - Network & proxy relay
 
-/// Cloudflare Worker settings plus the direct/relay diagnostics table (RN `renderNetwork`).
+/// Cloudflare Worker settings plus the direct/relay diagnostics rows (RN `renderNetwork`).
 struct NetworkSettingsView: View {
     let model: SettingsViewModel
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: AppTheme.Spacing.section) {
-                SettingsPageIntro(text: "Choose how you connect.")
-
-                connectionBanner
-
-                SettingsSection(
-                    title: "Cloudflare relay",
-                    hint: "With the relay off, a saved Worker is still used for TLS-fragile CDNs and request fallbacks. Remove it to use direct connections only."
-                ) {
-                    SettingsToggleRow(
-                        title: "Route all traffic via Worker",
-                        subtitle: model.settings.proxy.enabled
-                            ? "Relay enabled for all requests"
-                            : "Direct first, with registered Worker fallback",
-                        isOn: model.settings.proxy.enabled,
-                        isBusy: model.busy == .proxy,
-                        onChange: { value in Task { await model.setProxyEnabled(value) } }
-                    )
-
-                    workerForm
-                }
-
-                diagnosticsSection
-            }
-            .padding(.horizontal, AppTheme.Spacing.screenHorizontal)
-            .padding(.vertical, AppTheme.Spacing.section)
-        }
-        .background(AppTheme.background.ignoresSafeArea())
-        .navigationTitle("Connection")
-        .navigationBarTitleDisplayMode(.inline)
-        .settingsAlert(model)
-    }
-
-    private var connectionBanner: some View {
-        HStack(spacing: AppTheme.Spacing.item) {
-            Image(systemName: "antenna.radiowaves.left.and.right")
-                .font(.system(size: AppTheme.Icon.standard, weight: .semibold))
-                .foregroundStyle(AppTheme.color(0xA0A7F5))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(model.networkSummary)
-                    .font(AppTheme.Typography.body)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(AppTheme.color(0xE5E7F0))
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("Applies to all sources")
-                    .font(AppTheme.Typography.secondary)
-                    .foregroundStyle(AppTheme.color(0x959BB2))
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(14)
-        .background(AppTheme.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
-    }
-
-    private var workerForm: some View {
         @Bindable var model = model
 
-        return VStack(alignment: .leading, spacing: AppTheme.Spacing.section) {
-            SettingsField(
-                label: "Worker URL",
-                placeholder: "https://your-worker.workers.dev",
-                text: $model.workerURLDraft,
-                isURL: true
-            )
+        Form {
+            Section {
+                HStack(spacing: AppTheme.Spacing.item) {
+                    Image(systemName: "antenna.radiowaves.left.and.right")
+                        .font(.system(size: AppTheme.Icon.standard, weight: .semibold))
+                        .foregroundStyle(AppTheme.primary)
+                        .accessibilityHidden(true)
 
-            HStack(spacing: AppTheme.Spacing.item) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(model.networkSummary)
+                            .font(AppTheme.Typography.body)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(AppTheme.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Text("Applies to all sources")
+                            .font(AppTheme.Typography.secondary)
+                            .foregroundStyle(AppTheme.textSecondary)
+                    }
+
+                    Spacer(minLength: 0)
+                }
+            }
+
+            Section {
+                SettingsToggleRow(
+                    title: "Route all traffic via Worker",
+                    subtitle: model.settings.proxy.enabled
+                        ? "Relay enabled for all requests"
+                        : "Direct first, with registered Worker fallback",
+                    isOn: model.settings.proxy.enabled,
+                    isBusy: model.busy == .proxy,
+                    onChange: { value in Task { await model.setProxyEnabled(value) } }
+                )
+
+                SettingsField(
+                    label: "Worker URL",
+                    placeholder: "https://your-worker.workers.dev",
+                    text: $model.workerURLDraft,
+                    isURL: true
+                )
+
                 SettingsActionButton(
                     title: "Save URL",
                     isBusy: model.busy == .worker,
@@ -1309,88 +1032,72 @@ struct NetworkSettingsView: View {
                         action: { Task { await model.removeWorker() } }
                     )
                 }
+            } header: {
+                Text("Cloudflare relay")
+            } footer: {
+                VStack(alignment: .leading, spacing: 4) {
+                    SettingsHint(text: "With the relay off, a saved Worker is still used for TLS-fragile CDNs and request fallbacks. Remove it to use direct connections only.")
+
+                    if !model.savedWorkerURL.isEmpty, trimmedDraft == model.savedWorkerURL {
+                        SettingsStatusText(text: "Worker URL saved on this device")
+                    }
+                }
             }
 
-            if !model.savedWorkerURL.isEmpty {
-                if trimmedDraft == model.savedWorkerURL {
-                    SettingsStatusText(text: "Worker URL saved on this device")
+            Section {
+                Button {
+                    Task { await model.testConnection() }
+                } label: {
+                    SettingsRow(
+                        title: "Test connection",
+                        systemImage: "waveform.path.ecg"
+                    )
                 }
+                .disabled(model.savedWorkerURL.isEmpty || model.busy != nil || model.isTestingConnection)
+
+                if model.isTestingConnection {
+                    HStack(spacing: AppTheme.Spacing.item) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Testing direct and relay access…")
+                            .font(AppTheme.Typography.secondary)
+                            .foregroundStyle(AppTheme.textSecondary)
+                    }
+                }
+
+                ForEach(model.connectionRows) { row in
+                    LabeledContent(row.name) {
+                        HStack(spacing: AppTheme.Spacing.item) {
+                            resultCell("Direct", row.direct)
+                            resultCell("Relay", row.relay)
+                        }
+                    }
+                }
+            } header: {
+                Text("Diagnostics")
+            } footer: {
+                SettingsHint(text: "Check which sources can be reached on your current connection. Compares direct and relay access; tests do not send your API keys.")
             }
         }
-        .padding(14)
+        .listStyle(.insetGrouped)
+        .navigationTitle("Connection")
+        .navigationBarTitleDisplayMode(.inline)
+        .settingsAlert(model)
     }
 
-    private var diagnosticsSection: some View {
-        SettingsSection(
-            title: "Diagnostics",
-            hint: "Compares direct and relay access. Tests do not send your API keys."
-        ) {
-            VStack(alignment: .leading, spacing: AppTheme.Spacing.section) {
-                SettingsHint(text: "Check which sources can be reached on your current connection.")
-
-                SettingsActionButton(
-                    title: "Test connection",
-                    isSecondary: true,
-                    isBusy: model.isTestingConnection,
-                    isDisabled: model.savedWorkerURL.isEmpty || model.busy != nil,
-                    action: { Task { await model.testConnection() } }
-                )
-
-                if !model.connectionRows.isEmpty {
-                    resultsTable
-                }
-            }
-            .padding(14)
+    /// One diagnostics cell: the leg name (Direct/Relay) above its status.
+    private func resultCell(_ label: String, _ result: NetworkDiagnosticResult?) -> some View {
+        VStack(alignment: .trailing, spacing: 2) {
+            Text(label)
+                .font(AppTheme.Typography.caption)
+                .foregroundStyle(AppTheme.textMuted)
+            Text(Self.statusLabel(result))
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(Self.statusColor(result))
         }
-    }
-
-    private var resultsTable: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 6) {
-                Text("SOURCE")
-                    .font(.system(.caption2, weight: .bold))
-                    .kerning(0.7)
-                    .foregroundStyle(AppTheme.color(0x747B96))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text("DIRECT")
-                    .font(.system(.caption2, weight: .bold))
-                    .kerning(0.7)
-                    .foregroundStyle(AppTheme.color(0x747B96))
-                    .frame(width: 76, alignment: .trailing)
-                Text("RELAY")
-                    .font(.system(.caption2, weight: .bold))
-                    .kerning(0.7)
-                    .foregroundStyle(AppTheme.color(0x747B96))
-                    .frame(width: 76, alignment: .trailing)
-            }
-            .padding(.vertical, AppTheme.Spacing.rowVertical)
-
-            ForEach(model.connectionRows) { row in
-                HStack(spacing: 6) {
-                    Text(row.name)
-                        .font(AppTheme.Typography.secondary)
-                        .foregroundStyle(AppTheme.color(0xC2C6D9))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .lineLimit(1)
-                    resultCell(row.direct)
-                    resultCell(row.relay)
-                }
-                .padding(.vertical, AppTheme.Spacing.rowVertical)
-                .overlay(alignment: .top) {
-                    Rectangle()
-                        .fill(AppTheme.divider)
-                        .frame(height: 1)
-                }
-            }
-        }
-    }
-
-    private func resultCell(_ result: NetworkDiagnosticResult?) -> some View {
-        Text(Self.statusLabel(result))
-            .font(.system(.caption, design: .monospaced))
-            .foregroundStyle(Self.statusColor(result))
-            .frame(width: 76, alignment: .trailing)
-            .lineLimit(1)
+        .frame(minWidth: 62, alignment: .trailing)
+        .lineLimit(1)
+        .accessibilityElement(children: .combine)
     }
 
     private static func statusLabel(_ result: NetworkDiagnosticResult?) -> String {
@@ -1423,37 +1130,39 @@ struct AboutSettingsView: View {
     let model: SettingsViewModel
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: AppTheme.Spacing.section) {
+        Form {
+            Section {
                 VStack(spacing: AppTheme.Spacing.item) {
                     Image(systemName: "square.stack.3d.up")
-                        .font(.system(size: 28, weight: .light))
-                        .foregroundStyle(AppTheme.color(0xB1B5FF))
-                        .frame(width: 64, height: 64)
-                        .background(AppTheme.color(0x1B1E39), in: RoundedRectangle(cornerRadius: 20))
+                        .font(AppTheme.Typography.screenTitle)
+                        .foregroundStyle(AppTheme.primaryLight)
+                        .accessibilityHidden(true)
+
                     Text("Booru Viewer")
                         .font(AppTheme.Typography.screenTitle)
                         .foregroundStyle(AppTheme.textPrimary)
+
                     Text("Your library. Your way.")
                         .font(AppTheme.Typography.secondary)
-                        .foregroundStyle(AppTheme.color(0x969BB3))
+                        .foregroundStyle(AppTheme.textSecondary)
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 6)
+                .padding(.vertical, AppTheme.Spacing.item)
+            }
 
-                SettingsSection(title: "Application") {
-                    SettingsRow(title: "Version", value: "1.0.0")
-                    SettingsRow(title: "Platform", value: "SwiftUI • iOS 17+")
-                    SettingsRow(title: "Connection", value: model.networkSummary, isLast: true)
-                }
-
+            Section {
+                LabeledContent("Version", value: "1.0.0")
+                LabeledContent("Platform", value: "SwiftUI • iOS 26+")
+                LabeledContent("Connection", value: model.networkSummary)
+            } header: {
+                Text("Application")
+            } footer: {
                 SettingsHint(text: "An independent multi-source viewer. Not affiliated with any content source. Adults only (18+).")
             }
-            .padding(.horizontal, AppTheme.Spacing.screenHorizontal)
-            .padding(.vertical, AppTheme.Spacing.section)
         }
-        .background(AppTheme.background.ignoresSafeArea())
+        .listStyle(.insetGrouped)
         .navigationTitle("About")
         .navigationBarTitleDisplayMode(.inline)
+        .settingsAlert(model)
     }
 }

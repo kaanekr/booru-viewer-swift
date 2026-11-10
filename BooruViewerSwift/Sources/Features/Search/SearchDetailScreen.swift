@@ -83,6 +83,9 @@ struct SearchDetailScreen: View {
             },
             onOpenPost: onOpenPost
         )
+        // The pushed screen owns the navigation title and back button; `SearchScreen`
+        // only shows its "Search" title when it is the tab root.
+        .environment(\.searchChromeMode, .pushed)
         .navigationTitle(tags)
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(item: $pushedTag) { target in

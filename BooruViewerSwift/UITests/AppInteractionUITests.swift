@@ -8,11 +8,12 @@ import XCTest
 /// the actual simulator: launch in `-demoMode` (offline `DemoBooruSource`, in-memory stores),
 /// swipe the masonry grid, compare the first card's frame, tap a card to open the viewer, and
 /// switch every tab.
+///
+/// Note on pending fixture-gated UI suites: `NativePlayerInteractionUITests` (`-videoFixture`)
+/// and `MangaScrollUITests` (`-mangaFixture`) intentionally `XCTSkip` until deterministic
+/// offline video and delayed-reader fixtures are wired into the app target.
 final class AppInteractionUITests: XCTestCase {
     private var app: XCUIApplication!
-
-    /// Vertical offset below which a card sits behind the floating Explore header.
-    private static let headerClearance: CGFloat = 170
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -31,7 +32,7 @@ final class AppInteractionUITests: XCTestCase {
     /// tap on a card still opens the viewer.
     func testGridScrollsAndTapOpensViewer() throws {
         XCTAssertTrue(
-            exploreHeaderButton.waitForExistence(timeout: 30),
+            waitUntil(timeout: 30, { self.exploreFeedIsVisible }),
             "The Explore feed did not appear (launch arguments: -demoMode -initialTab feed)"
         )
         XCTAssertTrue(
@@ -96,7 +97,7 @@ final class AppInteractionUITests: XCTestCase {
             "The tab bar did not appear"
         )
         XCTAssertTrue(
-            exploreHeaderButton.exists,
+            waitUntil(timeout: 20, { self.exploreFeedIsVisible }),
             "The Explore tab is not the launch tab"
         )
 
@@ -120,7 +121,7 @@ final class AppInteractionUITests: XCTestCase {
 
         app.tabBars.buttons["Explore"].tap()
         XCTAssertTrue(
-            exploreHeaderButton.waitForExistence(timeout: 20),
+            waitUntil(timeout: 20, { self.exploreFeedIsVisible }),
             "Going back to Explore did not restore the feed"
         )
     }
@@ -223,7 +224,7 @@ final class AppInteractionUITests: XCTestCase {
     /// as `testGridScrollsAndTapOpensViewer`.
     private func openViewer() {
         XCTAssertTrue(
-            exploreHeaderButton.waitForExistence(timeout: 30),
+            waitUntil(timeout: 30, { self.exploreFeedIsVisible }),
             "The Explore feed did not appear (launch arguments: -demoMode -initialTab feed)"
         )
         XCTAssertTrue(
@@ -244,33 +245,66 @@ final class AppInteractionUITests: XCTestCase {
         app.tabBars.buttons["Explore"]
     }
 
-    /// The header title button (`FeedScreen` labels it "Explore. Scroll to top").
-    private var exploreHeaderButton: XCUIElement {
-        app.buttons["Explore. Scroll to top"]
+    /// Native Explore navigation chrome (`FeedScreen` sets `.navigationTitle("Explore")`
+    /// and the toolbar button identifier `"feed.sourceButton"`).
+    private var exploreNavigationBar: XCUIElement {
+        app.navigationBars["Explore"]
     }
 
-    /// The tallest scroll view on screen is the masonry grid; the header's chip rows are
+    private var exploreSourceButton: XCUIElement {
+        app.buttons["feed.sourceButton"]
+    }
+
+    private var exploreFeedIsVisible: Bool {
+        exploreSourceButton.exists
+            && (exploreNavigationBar.exists || app.navigationBars.staticTexts["Explore"].exists)
+    }
+
+    /// The tallest scroll view on screen is the masonry grid; the inline chip rows are
     /// short horizontal scroll views and never win this comparison.
     private var gridScrollView: XCUIElement {
         let scrollViews = app.scrollViews.allElementsBoundByIndex
         return scrollViews.max(by: { $0.frame.height < $1.frame.height }) ?? app.scrollViews.firstMatch
     }
 
-    /// The first post card that is on screen and clear of the floating header.
+    /// Bottom edge of the active navigation bar, or the grid top if unavailable.
+    private var navBarBottomY: CGFloat {
+        if exploreNavigationBar.exists {
+            return exploreNavigationBar.frame.maxY
+        }
+        let navBar = app.navigationBars.firstMatch
+        return navBar.exists ? navBar.frame.maxY : gridScrollView.frame.minY
+    }
+
+    /// Top edge of the floating tab bar when present.
+    private var tabBarTopY: CGFloat {
+        let tabBar = app.tabBars.firstMatch
+        return tabBar.exists ? tabBar.frame.minY : gridScrollView.frame.maxY
+    }
+
+    /// The first post card on screen inside the scoped grid coordinates, clear of the
+    /// native navigation bar above and the floating tab bar below.
     private func firstVisibleCard() -> XCUIElement? {
-        let cards = gridScrollView.buttons.allElementsBoundByIndex
+        let grid = gridScrollView
+        let gridFrame = grid.frame
+        let minClearY = max(navBarBottomY, gridFrame.minY)
+        let maxClearY = min(tabBarTopY, gridFrame.maxY)
+        let cards = grid.buttons.allElementsBoundByIndex
         return cards.first { card in
             card.exists
                 && card.isHittable
-                && card.frame.height > 40
-                && card.frame.minY > Self.headerClearance
+                && card.frame.height > 75
+                && card.frame.width > 90
+                && card.frame.minY >= minClearY
+                && card.frame.midY > minClearY
+                && card.frame.midY < maxClearY
         }
     }
 
-    /// `SearchScreen`'s field; its placeholder is the element label while the field is empty.
+    /// `SearchScreen`'s native `.searchable` field (`prompt: "Search tags or creators..."`).
     private var searchField: XCUIElement {
-        let byPlaceholder = app.textFields["Search tags or creators..."]
-        return byPlaceholder.exists ? byPlaceholder : app.textFields.firstMatch
+        let byPrompt = app.searchFields["Search tags or creators..."]
+        return byPrompt.exists ? byPrompt : app.searchFields.firstMatch
     }
 
     private var favoritesSegmentsAreVisible: Bool {
@@ -282,18 +316,24 @@ final class AppInteractionUITests: XCTestCase {
     /// The viewer is a `fullScreenCover`, so the presenting hierarchy (tab bar included)
     /// leaves the accessibility tree; the badge and close control are extra signals.
     private var viewerIsPresented: Bool {
-        if app.buttons["Close"].exists || app.buttons["xmark"].exists { return true }
+        if app.buttons["viewer.closeButton"].exists
+            || app.buttons["Close"].exists
+            || app.buttons["xmark"].exists {
+            return true
+        }
         let badge = app.staticTexts
             .matching(NSPredicate(format: "label MATCHES %@", "^[0-9]+ / [0-9]+$"))
         if badge.count > 0 { return true }
         return !exploreTabBarButton.exists
     }
 
-    /// The viewer's own documented dismiss gesture (pull down past 80 pt), with a labelled
-    /// close control as a fallback when one exists.
+    /// The viewer's own documented dismiss gesture (pull down past 80 pt), with the labelled
+    /// close control when visible.
     private func closeViewer() {
         for _ in 0..<3 {
-            if app.buttons["Close"].exists {
+            if app.buttons["viewer.closeButton"].exists {
+                app.buttons["viewer.closeButton"].tap()
+            } else if app.buttons["Close"].exists {
                 app.buttons["Close"].tap()
             } else {
                 app.swipeDown()

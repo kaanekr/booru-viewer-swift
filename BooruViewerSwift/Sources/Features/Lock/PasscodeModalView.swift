@@ -17,6 +17,14 @@ enum PasscodeMode: String, Identifiable, CaseIterable {
 /// Mirrors `src/components/PasscodeModal.tsx`: the view owns only the step machine and
 /// delegates every security operation to the injected closures, so `SettingsViewModel`
 /// stays the single owner of `SecurityService` state.
+///
+/// This is the **app-lock PIN** (a 4-digit value hashed by `SecurityService`), not the iOS
+/// device passcode: the modal never offers a `LocalAuthentication` device-passcode fallback
+/// and every step still goes through the injected `verify` / `setPasscode` / `clearPasscode`.
+///
+/// Presentation is stock iOS 26: a `NavigationStack` around the pad with the system toolbar
+/// Cancel button (the bar draws its own glass) instead of a hand-positioned overlay glyph.
+/// The sheet's drag indicator is the system default rather than hidden.
 struct PasscodeModalView: View {
     let mode: PasscodeMode
     /// RN `SecurityService.verifyPasscode` collapse.
@@ -46,16 +54,24 @@ struct PasscodeModalView: View {
     }
 
     var body: some View {
-        PINPadView(
-            title: title,
-            subtitle: subtitle,
-            showsCancelButton: true,
-            onCancel: { dismiss() },
-            onSubmit: { pin in await handle(pin) }
-        )
+        NavigationStack {
+            PINPadView(
+                title: title,
+                subtitle: subtitle,
+                showsCancelButton: false,
+                onSubmit: { pin in await handle(pin) }
+            )
+            .navigationTitle("App Passcode")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", role: .cancel) { dismiss() }
+                        .accessibilityIdentifier("passcode.cancel")
+                }
+            }
+        }
         .preferredColorScheme(.dark)
         .presentationDetents([.large])
-        .presentationDragIndicator(.hidden)
     }
 
     // MARK: - Copy (RN PasscodeModal.tsx:38-72)

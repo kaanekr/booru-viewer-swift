@@ -17,10 +17,17 @@ enum TagSearchModification: Sendable, Equatable {
 /// Bottom sheet with the visible post's metadata, copy actions and categorized
 /// tags. Mirrors RN `PostInfoModal` (src/components/PostInfoModal.tsx).
 ///
-/// Tap on a tag searches it (`onSelectTag`); the `•••` menu (and the chip's
-/// context menu) offers all seven RN tag actions: search, add to search, exclude
-/// from search, pin/unpin favorite tag, add/remove blacklist, save to history and
-/// copy.
+/// Presentation is stock iOS 26: a `NavigationStack` around a grouped `List` of
+/// `Section`s, `LabeledContent` metadata rows, a toolbar Done button and native
+/// `Menu` / `contextMenu` tag actions. The view draws no sheet shell of its own —
+/// no drag handle, no card backgrounds, no material or background override — so the
+/// system sheet chrome, its grabber (added by the presenter) and Liquid Glass stay
+/// untouched.
+///
+/// Tap on a tag searches it (`onSelectTag`); the trailing `•••` menu (and the tag
+/// row's context menu) offers all seven RN tag actions: search, add to search,
+/// exclude from search, pin/unpin favorite tag, add/remove blacklist, save to
+/// history and copy.
 @MainActor
 struct PostInfoSheetView: View {
     let post: BooruPost
@@ -61,107 +68,74 @@ struct PostInfoSheetView: View {
     @State private var toastTask: Task<Void, Never>?
 
     var body: some View {
-        VStack(spacing: 0) {
-            dragHandle
-            header
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    postSection
-                    tagsSection
-                    if let niches = post.niches, !niches.isEmpty {
-                        nichesSection(niches)
-                    }
-                    otherSection
+        NavigationStack {
+            List {
+                Section("Post") {
+                    postRows
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 4)
-                .padding(.bottom, 40)
+                Section("Tags") {
+                    tagRows
+                }
+                if let niches = post.niches, !niches.isEmpty {
+                    Section("Niches") {
+                        nicheRows(niches)
+                    }
+                }
+                Section("Other") {
+                    otherRows
+                }
             }
-            .scrollIndicators(.visible)
+            .listStyle(.insetGrouped)
+            .navigationTitle("Info")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                        .fontWeight(.semibold)
+                }
+            }
+            // A transient status line over the list content; it never takes touches.
+            .overlay(alignment: .bottom) { toast }
         }
-        .background(AppTheme.background)
-        .overlay(alignment: .top) { toast }
-    }
-
-    // MARK: Chrome
-
-    private var dragHandle: some View {
-        Capsule()
-            .fill(AppTheme.border)
-            .frame(width: 36, height: 4.5)
-            .padding(.top, 12)
-            .padding(.bottom, 6)
-    }
-
-    private var header: some View {
-        HStack {
-            circleButton(system: "xmark") { dismiss() }
-            Spacer()
-            Text("Info")
-                .font(.headline)
-                .foregroundStyle(AppTheme.textPrimary)
-            Spacer()
-            Color.clear.frame(width: 38, height: 38)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-    }
-
-    private func circleButton(system: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: system)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(AppTheme.textPrimary)
-                .frame(width: 38, height: 38)
-                .background(AppTheme.surface, in: Circle())
-        }
-        .buttonStyle(.plain)
+        .tint(AppTheme.primary)
     }
 
     // MARK: Sections
 
-    private var postSection: some View {
-        section("Post") {
-            VStack(spacing: 0) {
-                if let title = post.title, !title.isEmpty {
-                    row(label: "Title", value: title) { copyToPasteboard(title, label: "Title") }
-                    divider
-                }
-                row(
-                    label: "Normal (\(sampleExtension))",
-                    value: "\(sampleWidth)px X \(sampleHeight)px"
-                ) {
-                    copyToPasteboard((post.sampleURL ?? post.previewURL)?.absoluteString ?? "", label: "Normal Image URL")
-                }
-                divider
-                row(
-                    label: "Original (\(originalExtension))",
-                    value: originalDetail
-                ) {
-                    copyToPasteboard((post.originalURL ?? post.sampleURL)?.absoluteString ?? "", label: "Image URL")
-                }
-                divider
-                row(
-                    label: "Source",
-                    value: post.sourceLink?.absoluteString ?? "Unknown / None",
-                    icon: "arrow.up.right.square"
-                ) {
-                    if let link = post.sourceLink {
-                        openURL(link)
-                    } else {
-                        showToast("Source link not available")
-                    }
-                }
-                divider
-                row(
-                    label: "URL",
-                    value: (post.originalURL ?? post.sampleURL)?.absoluteString ?? "Unknown / None"
-                ) {
-                    copyToPasteboard((post.originalURL ?? post.sampleURL)?.absoluteString ?? "", label: "Image URL")
-                }
+    @ViewBuilder
+    private var postRows: some View {
+        if let title = post.title, !title.isEmpty {
+            row(label: "Title", value: title) { copyToPasteboard(title, label: "Title") }
+        }
+        row(
+            label: "Normal (\(sampleExtension))",
+            value: "\(sampleWidth)px X \(sampleHeight)px"
+        ) {
+            copyToPasteboard((post.sampleURL ?? post.previewURL)?.absoluteString ?? "", label: "Normal Image URL")
+        }
+        row(
+            label: "Original (\(originalExtension))",
+            value: originalDetail
+        ) {
+            copyToPasteboard((post.originalURL ?? post.sampleURL)?.absoluteString ?? "", label: "Image URL")
+        }
+        row(
+            label: "Source",
+            value: post.sourceLink?.absoluteString ?? "Unknown / None",
+            icon: "arrow.up.right.square",
+            hint: post.sourceLink == nil ? "Source link not available" : "Opens the source page"
+        ) {
+            if let link = post.sourceLink {
+                openURL(link)
+            } else {
+                showToast("Source link not available")
             }
-            .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 14))
+        }
+        row(
+            label: "URL",
+            value: (post.originalURL ?? post.sampleURL)?.absoluteString ?? "Unknown / None"
+        ) {
+            copyToPasteboard((post.originalURL ?? post.sampleURL)?.absoluteString ?? "", label: "Image URL")
         }
     }
 
@@ -191,28 +165,19 @@ struct PostInfoSheetView: View {
         return items
     }
 
-    private var tagsSection: some View {
-        section("Tags") {
-            // Each row reserves a 44 pt hit target around a 28 pt pill. `lineSpacing`
-            // stays 0 (not negative) so neighbouring 44 pt targets never overlap and
-            // the drawn pills stay the same size as every other chip.
-            TagFlowLayout(spacing: 8, lineSpacing: 0) {
-                ForEach(tagItems, id: \.name) { item in
-                    tagChipWithMenu(for: item)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+    @ViewBuilder
+    private var tagRows: some View {
+        ForEach(tagItems, id: \.name) { item in
+            tagRow(for: item)
         }
     }
 
-    /// One tag chip with its `•••` menu folded into the same category-coloured
-    /// pill (RN `tagRowItem` + `yellowDotsBadge`, PostInfoModal.tsx:644-676).
-    ///
-    /// The text and the menu are sibling buttons inside a shared pill, so tapping
-    /// the ellipsis never also runs the chip's search action. The pill row reserves
-    /// a 44 pt tall hit target while the drawn pill stays the same compact height
-    /// as every other chip, so small tags do not grow visually.
-    private func tagChipWithMenu(
+    /// One native list row per tag: the tag name is its own button (tap searches it)
+    /// and the trailing `•••` is a separate `Menu`, so opening the menu never also
+    /// runs the search. Both controls are siblings inside the row — no nested buttons —
+    /// both reserve Apple's 44 pt tap target, and the name keeps its category colour
+    /// as the leading accessory of a stock `List` row.
+    private func tagRow(
         for item: PostInfoTagItem,
         displayText: String? = nil,
         displayCategory: TagCategory? = nil
@@ -222,64 +187,64 @@ struct PostInfoSheetView: View {
         let category = displayCategory ?? item.category
         let isPinned = viewModel.isPinnedTag(item.name)
 
-        return HStack(spacing: 0) {
+        return HStack(spacing: AppTheme.Spacing.item) {
             Button {
                 selectTag(item.name)
             } label: {
-                Text(shown)
-                    .font(.system(size: 13, weight: isPinned ? .bold : .semibold))
-                    .foregroundStyle(AppTheme.tagColor(for: category))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .padding(.horizontal, 10)
-                    // Same 44 pt target as the menu; the pill drawn behind it stays
-                    // 28 pt tall, so the chip does not look bigger.
-                    .frame(height: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(shown)
-            // Long-press on the tag text keeps opening the same seven-action menu
-            // it did before the ellipsis moved inside the pill.
-            .contextMenu { tagMenu(for: item) }
+                HStack(spacing: 6) {
+                    Text(shown)
+                        .font(AppTheme.Typography.body)
+                        .fontWeight(isPinned ? .bold : .semibold)
+                        .foregroundStyle(AppTheme.tagColor(for: category))
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
 
-            Rectangle()
-                .fill(AppTheme.tagBorder(for: category))
-                .frame(width: 1, height: 14)
+                    // Pinned tags are also marked with the system pin glyph, so the
+                    // state does not rest on weight alone.
+                    if isPinned {
+                        Image(systemName: "pin.fill")
+                            .font(AppTheme.Typography.caption)
+                            .foregroundStyle(AppTheme.tagColor(for: category))
+                            .accessibilityHidden(true)
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: AppTheme.Spacing.minimumHitTarget, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            // Borderless keeps this button's own hit area instead of letting the row
+            // swallow every touch, which would hide the menu beside it.
+            .buttonStyle(.borderless)
+            .accessibilityLabel(shown)
+            // Long-pressing the tag name still opens the same seven-action menu.
+            .contextMenu { tagMenu(for: item) }
 
             Menu {
                 tagMenu(for: item)
             } label: {
                 Image(systemName: "ellipsis")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(AppTheme.tagColor(for: category))
-                    // Full 44 pt target inside the pill; the drawn pill stays compact
-                    // because only this row's height grows, not the chip fill.
-                    .frame(width: 44, height: 44)
+                    .font(AppTheme.Typography.body)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(AppTheme.textSecondary)
+                    .frame(
+                        width: AppTheme.Spacing.minimumHitTarget,
+                        height: AppTheme.Spacing.minimumHitTarget
+                    )
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            // Borderless keeps the trailing control's own hit area inside the row and
+            // leaves the label as the plain system ellipsis: no detached pill, no
+            // second card style to drift away from the tag name beside it.
+            .buttonStyle(.borderless)
             .accessibilityLabel("Tag actions for \(shown)")
+            .accessibilityHint("Opens the seven tag actions")
             .accessibilityIdentifier("info.tagMenu")
         }
-        .frame(height: 44)
-        .background(alignment: .center) {
-            RoundedRectangle(cornerRadius: 12)
-                .fill(
-                    isPinned
-                        ? AppTheme.tagColor(for: category).opacity(0.26)
-                        : AppTheme.tagBackground(for: category)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(AppTheme.tagBorder(for: category), lineWidth: isPinned ? 1.5 : 1)
-                )
-                .frame(height: 28)
-        }
-        .contentShape(RoundedRectangle(cornerRadius: 12))
     }
 
     /// The seven tag actions of RN `PostInfoModal` (PostInfoModal.tsx:806-880).
+    ///
+    /// The pin/blacklist titles read the live tag lists when the menu is built, so a
+    /// toggle shows its new state the next time the menu opens.
     @ViewBuilder
     private func tagMenu(for item: PostInfoTagItem) -> some View {
         let token = formattedSearchToken(for: item.name, category: item.category, sourceID: post.sourceID)
@@ -346,106 +311,94 @@ struct PostInfoSheetView: View {
         }
     }
 
-    private func nichesSection(_ niches: [String]) -> some View {
-        section("Niches") {
-            TagFlowLayout(spacing: 8, lineSpacing: 0) {
-                ForEach(niches, id: \.self) { niche in
-                    // Same chip + inline ellipsis treatment as the Tags section, so
-                    // the two lists cannot drift apart visually.
-                    tagChipWithMenu(
-                        for: PostInfoTagItem(name: "niche:\(niche)", category: .general),
-                        displayText: niche.replacingOccurrences(of: "-", with: " "),
-                        displayCategory: .meta
-                    )
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+    private func nicheRows(_ niches: [String]) -> some View {
+        ForEach(niches, id: \.self) { niche in
+            // Same row + inline menu treatment as the Tags section, so the two
+            // lists cannot drift apart visually.
+            tagRow(
+                for: PostInfoTagItem(name: "niche:\(niche)", category: .general),
+                displayText: niche.replacingOccurrences(of: "-", with: " "),
+                displayCategory: .meta
+            )
         }
     }
 
-    private var otherSection: some View {
-        section("Other") {
-            VStack(spacing: 0) {
-                row(label: "ID", value: post.id) { copyToPasteboard(post.id, label: "Post ID") }
-                divider
-                row(label: "Posted", value: Self.formatPostedDate(post.createdAt))
-                divider
-                row(label: "Score", value: String(post.score))
-                divider
-                row(label: "Rating", value: Self.ratingLabel(post.rating))
-            }
-            .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 14))
-        }
+    @ViewBuilder
+    private var otherRows: some View {
+        row(label: "ID", value: post.id) { copyToPasteboard(post.id, label: "Post ID") }
+        row(label: "Posted", value: Self.formatPostedDate(post.createdAt))
+        row(label: "Score", value: String(post.score))
+        row(label: "Rating", value: Self.ratingLabel(post.rating))
     }
 
     // MARK: Building blocks
 
-    private func section<Content: View>(
-        _ title: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.headline)
-                .foregroundStyle(AppTheme.textPrimary)
-            content()
-        }
-    }
-
+    /// One metadata line. A row with an action becomes a native `List` button, so the
+    /// whole row is the tap target; a plain value stays inert content.
+    @ViewBuilder
     private func row(
         label: String,
         value: String,
         icon: String = "doc.on.doc",
+        hint: String? = nil,
         action: (() -> Void)? = nil
     ) -> some View {
-        Button {
-            action?()
-        } label: {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(label)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(AppTheme.textPrimary)
-                    Text(value)
-                        .font(.caption)
-                        .foregroundStyle(AppTheme.textSecondary)
-                        .lineLimit(2)
-                        .truncationMode(.middle)
-                        .multilineTextAlignment(.leading)
-                }
-                Spacer(minLength: 0)
-                if action != nil {
-                    Image(systemName: icon)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(AppTheme.primary)
-                }
+        if let action {
+            Button {
+                action()
+            } label: {
+                rowContent(label: label, value: value, icon: icon)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .contentShape(Rectangle())
+            // Borderless is the `List` idiom for a row-sized control: the full label
+            // area is hit-testable and the system still shows its pressed state.
+            .buttonStyle(.borderless)
+            .accessibilityHint(hint ?? "Copies \(label)")
+        } else {
+            rowContent(label: label, value: value, icon: nil)
         }
-        .buttonStyle(.plain)
-        .disabled(action == nil)
     }
 
-    private var divider: some View {
-        Rectangle()
-            .fill(AppTheme.border)
-            .frame(height: 0.5)
-            .padding(.leading, 14)
+    /// `LabeledContent` gives the standard two-column metadata layout: label leading,
+    /// value trailing, with the system's own spacing and Dynamic Type behaviour.
+    private func rowContent(label: String, value: String, icon: String?) -> some View {
+        LabeledContent {
+            HStack(spacing: 6) {
+                Text(value)
+                    .font(AppTheme.Typography.secondary)
+                    .foregroundStyle(AppTheme.textSecondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .multilineTextAlignment(.trailing)
+
+                if let icon {
+                    Image(systemName: icon)
+                        .font(AppTheme.Typography.secondary)
+                        .foregroundStyle(AppTheme.primary)
+                        .accessibilityHidden(true)
+                }
+            }
+        } label: {
+            Text(label)
+                .font(AppTheme.Typography.body)
+                .foregroundStyle(AppTheme.textPrimary)
+        }
+        // Full row width keeps the copy target row-sized rather than text-sized.
+        .frame(maxWidth: .infinity, minHeight: AppTheme.Spacing.minimumHitTarget, alignment: .leading)
+        .contentShape(Rectangle())
     }
 
     private var toast: some View {
         Group {
             if let toastMessage {
                 Text(toastMessage)
-                    .font(.footnote.weight(.semibold))
+                    .font(AppTheme.Typography.secondary)
                     .foregroundStyle(AppTheme.textPrimary)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
-                    .background(AppTheme.surface, in: Capsule())
-                    .overlay(Capsule().stroke(AppTheme.primary, lineWidth: 1))
-                    .padding(.top, 56)
+                    .background(AppTheme.contentMaterial, in: Capsule())
+                    .padding(.bottom, 8)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
             }
         }
     }
@@ -555,12 +508,16 @@ struct PostInfoSheetView: View {
     }
 
     private func showToast(_ message: String) {
-        toastMessage = message
+        withAnimation(.easeInOut(duration: 0.15)) {
+            toastMessage = message
+        }
         toastTask?.cancel()
         toastTask = Task {
             try? await Task.sleep(nanoseconds: 2_200_000_000)
             guard !Task.isCancelled else { return }
-            toastMessage = nil
+            withAnimation(.easeInOut(duration: 0.15)) {
+                toastMessage = nil
+            }
         }
     }
 
@@ -642,54 +599,8 @@ struct PostInfoSheetView: View {
 
 // MARK: - Tag item
 
-/// One categorized post tag rendered as a `TagChipView` in the sheet.
+/// One categorized post tag rendered as a native info-sheet row.
 private struct PostInfoTagItem: Hashable {
     let name: String
     let category: TagCategory
-}
-
-// MARK: - Tag flow layout
-/// Wraps `TagChipView`s like RN's tag list: chip-by-chip, new line when the width
-/// is exhausted (PostInfoModal.tsx:640-678).
-private struct TagFlowLayout: Layout {
-    var spacing: CGFloat = 8
-    var lineSpacing: CGFloat = 8
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) -> CGSize {
-        let maxWidth = proposal.width ?? .infinity
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        var lineHeight: CGFloat = 0
-
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x > 0, x + size.width > maxWidth {
-                x = 0
-                y += lineHeight + lineSpacing
-                lineHeight = 0
-            }
-            x += size.width + spacing
-            lineHeight = max(lineHeight, size.height)
-        }
-
-        return CGSize(width: maxWidth.isFinite ? maxWidth : x, height: y + lineHeight)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) {
-        var x = bounds.minX
-        var y = bounds.minY
-        var lineHeight: CGFloat = 0
-
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x > bounds.minX, x + size.width > bounds.maxX {
-                x = bounds.minX
-                y += lineHeight + lineSpacing
-                lineHeight = 0
-            }
-            subview.place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: ProposedViewSize(size))
-            x += size.width + spacing
-            lineHeight = max(lineHeight, size.height)
-        }
-    }
 }

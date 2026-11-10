@@ -19,11 +19,13 @@ enum FeedTagSearchAction: Sendable {
 /// Explore tab: source switcher, source-aware quick filters, trending tags, a two-column
 /// masonry grid, pull-to-refresh and infinite pagination.
 ///
-/// Mirrors RN `FeedScreen` (src/screens/FeedScreen.tsx:332-577). The header is an
-/// opaque overlay that slides away with the scroll (see `ScrollAwayHeaderView`) and is
-/// pinned while refreshing or while the source sheet is open (FeedScreen.tsx:100-104).
-/// The slide is continuous: it tracks the content offset through
-/// `ScrollAwayHeaderState` instead of waiting for a full header height.
+/// Chrome is stock iOS 26: the screen carries its own native navigation title and subtitle,
+/// and the source switcher plus the feed-order menu live in the navigation toolbar, so the
+/// system draws the collapsing large title, the scroll-edge material, and the Liquid Glass
+/// toolbar controls around the content. The quick-filter strip and the trending-tag strip
+/// scroll with the grid; nothing is overlaid on the navigation or tab bar.
+///
+/// Mirrors RN `FeedScreen` (src/screens/FeedScreen.tsx:332-577).
 @MainActor
 struct FeedScreen: View {
     private let settings: AppSettings
@@ -45,26 +47,17 @@ struct FeedScreen: View {
 
     @State private var model: FeedViewModel
     @State private var isSourceSheetOpen = false
-    /// Measured height of the overlaid header; the grid reserves exactly this much space.
-    @State private var headerHeight: CGFloat = 132
-    /// Continuous collapse of the header, driven by the scroll offset.
-    @State private var headerState = ScrollAwayHeaderState()
+    /// Width measured from the scroll view itself (never a `GeometryReader` wrapper), so the
+    /// masonry split follows the container and native scroll-edge/large-title behaviour stays.
+    @State private var availableWidth: CGFloat = 0
     /// Memoized masonry split: rebuilt only when the page or the column width changes,
     /// never on plain body evaluation.
     @State private var columns: [[BooruPost]] = [[], []]
-    /// Bumped by a header tap; the grid observes it and scrolls back to the top.
-    @State private var scrollToTopSignal = 0
 
     private static let columnSpacing: CGFloat = 12
     /// Bottom breathing room inside the scroll content; the tab-bar clearance is
     /// handled by the host, not here.
     private static let bottomPadding: CGFloat = 12
-    /// Named space the scroll-offset reader measures against.
-    private static let scrollSpace = "feedScroll"
-    /// Anchor for "tap the header to jump to the top" (FeedScreen.tsx:340).
-    private static let topAnchor = "feedTopAnchor"
-    /// Duration of the header-tap scroll back to the top.
-    private static let scrollToTopDuration: Double = 0.25
 
     /// - Parameters:
     ///   - settings: image quality, grid previews, and the starting source/order.
@@ -144,72 +137,50 @@ struct FeedScreen: View {
     // MARK: Body
 
     var body: some View {
-        ZStack(alignment: .top) {
-            AppTheme.background.ignoresSafeArea()
-
-            feedContent
-
-            ScrollAwayHeaderView(
-                slideOffset: isHeaderPinned ? 0 : headerState.slide,
-                isPinned: isHeaderPinned,
-                isHidden: !isHeaderPinned && headerState.isFullyCollapsed
-            ) {
-                header
+        feedContent
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .navigationTitle("Explore")
+            // Native iOS 26 subtitle under the large title (FeedScreen.tsx:344-346).
+            .navigationSubtitle(subtitle)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    sourceToolbarButton
+                }
+                if model.quickFilters.count > 1 {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        feedOrderMenu
+                    }
+                }
             }
-        }
-        .onPreferenceChange(ScrollAwayHeaderHeightKey.self) { height in
-            if height > 0, abs(height - headerHeight) > 0.5 {
-                headerHeight = height
+            .sheet(isPresented: $isSourceSheetOpen) {
+                SourceSheetView(selectedSource: model.sourceID) { id in
+                    isSourceSheetOpen = false
+                    // Persist the pick so Explore, Search, and Settings stay in sync.
+                    onSelectSource?(id)
+                    Task { await model.selectSource(id) }
+                }
+                .presentationDetents([.medium, .large])
             }
-        }
-        .onChange(of: headerHeight) { _, _ in
-            resetHeaderSlide()
-        }
-        .onChange(of: isHeaderPinned) { _, _ in
-            resetHeaderSlide()
-        }
-        .onChange(of: model.sourceID) { _, _ in
-            // A new source rebuilds the quick filters, so the header reveals again.
-            resetHeaderSlide()
-        }
-        .onChange(of: model.filter) { _, _ in
-            // A quick-filter pick reloads the grid; a shown header keeps the chips usable.
-            resetHeaderSlide()
-        }
-        .onChange(of: model.posts.isEmpty) { _, isEmpty in
-            // Error, empty, and retry states have no scroll view to restore the bar.
-            if isEmpty { resetHeaderSlide() }
-        }
-        .sheet(isPresented: $isSourceSheetOpen) {
-            SourceSheetView(selectedSource: model.sourceID) { id in
-                isSourceSheetOpen = false
-                // Persist the pick so Explore, Search, and Settings stay in sync.
-                onSelectSource?(id)
-                Task { await model.selectSource(id) }
+            .task {
+                await model.loadInitialIfNeeded()
             }
-            .presentationDetents([.medium, .large])
-            .presentationBackground(AppTheme.background)
-        }
-        .task {
-            await model.loadInitialIfNeeded()
-        }
-        .onAppear {
-            model.updateContext(context)
-        }
-        .onChange(of: contextVersion) { _, _ in
-            // A Worker URL, API key, or quality edit pushes a fresh context into the model.
-            model.updateContext(context)
-        }
-        .onChange(of: settings.activeSourceID) { _, newValue in
-            guard newValue != model.sourceID else { return }
-            Task { await model.selectSource(newValue) }
-        }
-    }
-
-    /// RN keeps the header in place while refreshing, while the sheet is open, and when
-    /// the screen loses focus (FeedScreen.tsx:100-104).
-    private var isHeaderPinned: Bool {
-        model.isRefreshing || isSourceSheetOpen
+            .onAppear {
+                model.updateContext(context)
+            }
+            // Observe `model.posts` on the stable `body` ancestor rather than inside `grid`:
+            // `grid` unmounts whenever `model.posts.isEmpty` (source switch, empty refresh),
+            // so an inner observer misses `sourceA -> [] -> sourceB` at an unchanged width.
+            .onChange(of: model.posts, initial: true) { _, _ in
+                rebuildColumns(width: availableWidth)
+            }
+            .onChange(of: contextVersion) { _, _ in
+                // A Worker URL, API key, or quality edit pushes a fresh context into the model.
+                model.updateContext(context)
+            }
+            .onChange(of: settings.activeSourceID) { _, newValue in
+                guard newValue != model.sourceID else { return }
+                Task { await model.selectSource(newValue) }
+            }
     }
 
     @ViewBuilder
@@ -230,59 +201,50 @@ struct FeedScreen: View {
     // MARK: Grid
 
     private var grid: some View {
-        GeometryReader { geometry in
-            let width = geometry.size.width
-            let columnWidth = Self.columnWidth(for: width)
+        ScrollView {
+            VStack(spacing: AppTheme.Spacing.item) {
+                // A single Discover choice is not a filter (FeedScreen.tsx:369).
+                if model.quickFilters.count > 1 {
+                    quickFilterBar
+                }
 
-            ScrollViewReader { scrollProxy in
-                ScrollView {
-                    VStack(spacing: Self.columnSpacing) {
-                        // Space for the overlaid header so the first row starts below it.
-                        // Also the anchor the header tap scrolls back to.
-                        Color.clear
-                            .frame(height: headerHeight)
-                            .id(Self.topAnchor)
+                if !model.trendingTags.isEmpty {
+                    trendingBar
+                }
 
-                        HStack(alignment: .top, spacing: Self.columnSpacing) {
-                            ForEach(columns.indices, id: \.self) { index in
-                                column(columns[index], width: columnWidth)
-                            }
+                VStack(spacing: Self.columnSpacing) {
+                    HStack(alignment: .top, spacing: Self.columnSpacing) {
+                        ForEach(columns.indices, id: \.self) { index in
+                            column(columns[index], width: Self.columnWidth(for: availableWidth))
                         }
+                    }
 
-                        footer
-                    }
-                    .padding(.horizontal, AppTheme.Spacing.screenHorizontal)
-                    .padding(.bottom, Self.bottomPadding)
-                    .scrollAwayOffsetReader(space: Self.scrollSpace)
+                    footer
                 }
-                .scrollIndicators(.hidden)
-                .coordinateSpace(name: Self.scrollSpace)
-                .onAppear {
-                    rebuildColumns(width: width)
-                }
-                .onChange(of: width) { _, newWidth in
-                    rebuildColumns(width: newWidth)
-                }
-                .onChange(of: model.posts) { _, _ in
-                    rebuildColumns(width: width)
-                }
-                .onChange(of: scrollToTopSignal) { _, _ in
-                    withAnimation(.easeOut(duration: Self.scrollToTopDuration)) {
-                        scrollProxy.scrollTo(Self.topAnchor, anchor: .top)
-                    }
-                }
-                .onPreferenceChange(ScrollAwayOffsetKey.self) { offset in
-                    updateHeader(for: offset)
-                }
-                .refreshable {
-                    await model.refresh()
-                }
+                .padding(.horizontal, AppTheme.Spacing.screenHorizontal)
+                .padding(.top, AppTheme.Spacing.item)
+                .padding(.bottom, Self.bottomPadding)
             }
+        }
+        .scrollIndicators(.hidden)
+        // The grid stays the plain scroll view it has always been: the native navigation
+        // stack keeps the scroll edge and the collapsing large title, because no
+        // `GeometryReader` wraps it. Only the measured width is reported back.
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.width
+        } action: { width in
+            guard width.isFinite, width > 0 else { return }
+            guard abs(width - availableWidth) > 0.5 else { return }
+            availableWidth = width
+            rebuildColumns(width: width)
+        }
+        .refreshable {
+            await model.refresh()
         }
     }
 
     /// Memoized masonry split. Recomputed only when a page lands, the column width
-    /// changes, or the grid first appears â€” never on plain body evaluation.
+    /// changes, or the grid first appears — never on plain body evaluation.
     private func rebuildColumns(width: CGFloat) {
         let posts = model.posts
         guard !posts.isEmpty else {
@@ -293,6 +255,10 @@ struct FeedScreen: View {
         }
 
         let columnWidth = Self.columnWidth(for: width)
+        // A not-yet-measured width (0 at first layout) still produces a usable split: the
+        // estimator falls back to its badge allowance, and the columns take an equal share of
+        // the container until the measured pass replaces it. No zero/negative column frame
+        // and no permanently empty grid.
         var masonry = MasonryColumns()
         let next = masonry.layout(posts) { post in
             MasonryColumns.estimatedHeight(for: post, columnWidth: columnWidth)
@@ -310,8 +276,9 @@ struct FeedScreen: View {
         return (usable / CGFloat(MasonryColumns.defaultColumnCount)).rounded(.down)
     }
 
+    @ViewBuilder
     private func column(_ posts: [BooruPost], width: CGFloat) -> some View {
-        LazyVStack(spacing: Self.columnSpacing) {
+        let columnContent = LazyVStack(spacing: Self.columnSpacing) {
             ForEach(posts) { post in
                 card(for: post)
             }
@@ -321,7 +288,13 @@ struct FeedScreen: View {
                 paginationSentinel
             }
         }
-        .frame(width: width > 0 ? width : nil, alignment: .top)
+        // Before the first measured width the two columns share the container equally, so the
+        // grid is never a zero-width frame; the measured pass pins the exact column width.
+        if width > 0 {
+            columnContent.frame(width: width, alignment: .top)
+        } else {
+            columnContent.frame(maxWidth: .infinity, alignment: .top)
+        }
     }
 
     private func card(for post: BooruPost) -> some View {
@@ -351,13 +324,13 @@ struct FeedScreen: View {
                 ProgressView()
                     .tint(AppTheme.primary)
                 Text("Loading more...")
-                    .font(.system(size: 13))
+                    .font(AppTheme.Typography.secondary)
                     .foregroundStyle(AppTheme.textMuted)
             }
             .padding(.vertical, 20)
         } else if let message = model.errorMessage {
             Text(message)
-                .font(.system(size: 12))
+                .font(AppTheme.Typography.secondary)
                 .foregroundStyle(AppTheme.danger)
                 .multilineTextAlignment(.center)
                 .padding(.vertical, 16)
@@ -369,68 +342,52 @@ struct FeedScreen: View {
         onOpenPost(target.posts, target.index)
     }
 
-    // MARK: Header
+    // MARK: Toolbar
 
-    /// Continuous header collapse. Every scrolled point pulls the bar along, so it
-    /// starts sliding on the first downward delta and reappears on the first upward
-    /// delta anywhere in the list; jitter and the pull-to-refresh rubber band are
-    /// filtered inside `ScrollAwayHeaderState`.
-    private func updateHeader(for offset: CGFloat) {
-        // Pinned (refresh, sheet, editing): the `.onChange(of: isHeaderPinned)` reset
-        // already revealed the bar and dropped the baseline, so ignore scroll samples.
-        guard !isHeaderPinned else { return }
-        headerState.update(offset: offset, height: headerHeight)
+    private var sourceEntry: SourceSheetView.Entry {
+        SourceSheetView.entry(for: model.sourceID)
     }
 
-    /// Pinned refreshes, header remeasurement, source switches, and the source sheet put it back.
-    private func resetHeaderSlide() {
-        headerState.syncHeight(headerHeight)
-        headerState.reset()
-    }
-
-    /// RN scrolls the grid to y: 0 when the "Explore" title is tapped
-    /// (src/screens/FeedScreen.tsx:338-346).
-    private func scrollGridToTop() {
-        scrollToTopSignal &+= 1
-    }
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
-            HStack(alignment: .center, spacing: AppTheme.Spacing.item) {
-                Button(action: scrollGridToTop) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Explore")
-                            .font(AppTheme.Typography.screenTitle)
-                            .foregroundStyle(AppTheme.textPrimary)
-                        Text(subtitle)
-                            .font(AppTheme.Typography.secondary)
-                            .foregroundStyle(AppTheme.textMuted)
-                            .lineLimit(1)
-                    }
-                    .frame(minHeight: AppTheme.Spacing.minimumHitTarget, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Explore. Scroll to top")
-
-                Spacer(minLength: AppTheme.Spacing.item)
-
-                sourcePill
-            }
-            .padding(.horizontal, AppTheme.Spacing.screenHorizontal)
-
-            // A single Discover choice is not a filter (FeedScreen.tsx:369).
-            if model.quickFilters.count > 1 {
-                quickFilterBar
-            }
-
-            if !model.trendingTags.isEmpty {
-                trendingBar
+    /// Native toolbar source switcher; it opens the system sheet picker. The compact source
+    /// name stays visible next to the glyph, matching the old header pill (FeedScreen.tsx:362).
+    private var sourceToolbarButton: some View {
+        Button {
+            isSourceSheetOpen = true
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "square.stack.3d.up.fill")
+                Text(sourceEntry.shortName)
+                    .font(AppTheme.Typography.caption)
+                    .lineLimit(1)
             }
         }
-        .padding(.top, AppTheme.Spacing.rowVertical)
-        .padding(.bottom, AppTheme.Spacing.item)
+        .accessibilityLabel("Current source: \(sourceEntry.name). Change source")
+        .accessibilityIdentifier("feed.sourceButton")
     }
+
+    /// Native toolbar menu mirroring the quick-filter strip, so the feed order stays
+    /// reachable when the strip has scrolled away. Both paths call the same model method.
+    private var feedOrderMenu: some View {
+        Menu {
+            ForEach(model.quickFilters) { option in
+                Button {
+                    Task { await model.applyQuickFilter(option) }
+                } label: {
+                    if model.isActive(option) {
+                        Label(option.label, systemImage: "checkmark")
+                    } else {
+                        Text(option.label)
+                    }
+                }
+            }
+        } label: {
+            Label("Feed filters", systemImage: "line.3.horizontal.decrease.circle")
+        }
+        .accessibilityLabel("Feed filters")
+        .accessibilityIdentifier("feed.filterMenu")
+    }
+
+    // MARK: Header strips
 
     /// RN subtitle (FeedScreen.tsx:344-346).
     private var subtitle: String {
@@ -439,71 +396,66 @@ struct FeedScreen: View {
             : "Latest anime and illustrations"
     }
 
-    private var sourceEntry: SourceSheetView.Entry {
-        SourceSheetView.entry(for: model.sourceID)
-    }
-
-    private var sourcePill: some View {
-        Button {
-            isSourceSheetOpen = true
-        } label: {
-            HStack(spacing: 5) {
-                Image(systemName: "square.stack.3d.up.fill")
-                    .font(.system(size: AppTheme.Icon.small, weight: .semibold))
-                    .foregroundStyle(AppTheme.primaryLight)
-                Text(sourceEntry.shortName)
-                    .font(AppTheme.Typography.caption)
-                    .foregroundStyle(AppTheme.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            .padding(.horizontal, AppTheme.Spacing.chipHorizontal)
-            .padding(.vertical, AppTheme.Spacing.chipVertical)
-            .background(AppTheme.surface, in: Capsule())
-            .overlay {
-                Capsule().stroke(AppTheme.border, lineWidth: 1)
-            }
-            // Compact visual, full-size tap target.
-            .frame(minHeight: AppTheme.Spacing.minimumHitTarget)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Current source: \(sourceEntry.name). Change source")
-    }
-
     private var quickFilterBar: some View {
         ScrollView(.horizontal) {
             HStack(spacing: AppTheme.Spacing.item) {
                 ForEach(model.quickFilters) { option in
-                    let selected = model.isActive(option)
-                    Button {
-                        Task { await model.applyQuickFilter(option) }
-                    } label: {
-                        Text(option.label)
-                            .font(AppTheme.Typography.secondary)
-                            .fontWeight(selected ? .bold : .semibold)
-                            .foregroundStyle(selected ? AppTheme.goldAccentText : AppTheme.textSecondary)
-                            .lineLimit(1)
-                            .padding(.horizontal, AppTheme.Spacing.chipHorizontal)
-                            .padding(.vertical, AppTheme.Spacing.chipVertical)
-                            .background(selected ? AppTheme.goldAccent : AppTheme.chip, in: Capsule())
-                            .overlay {
-                                Capsule().stroke(
-                                    selected ? AppTheme.goldAccent : AppTheme.chipBorder,
-                                    lineWidth: 1
-                                )
-                            }
-                            // Compact chip, 44pt minimum tap target.
-                            .frame(minHeight: AppTheme.Spacing.minimumHitTarget)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(option.label)
+                    quickFilterChip(option)
                 }
             }
             .padding(.horizontal, AppTheme.Spacing.screenHorizontal)
         }
         .scrollIndicators(.hidden)
+    }
+
+    /// One quick-filter chip. The active chip is a promoted Liquid Glass button with a
+    /// checkmark, so the selected order is carried by the native style, not a hand-drawn fill.
+    @ViewBuilder
+    private func quickFilterChip(_ option: SourceQuickFilter) -> some View {
+        if model.isActive(option) {
+            Button {
+                Task { await model.applyQuickFilter(option) }
+            } label: {
+                quickFilterLabel(option, selected: true)
+            }
+            .buttonStyle(.glassProminent)
+            // RN keeps its gold "selected quick filter" accent (FeedScreen.tsx:39).
+            .tint(AppTheme.goldAccent)
+            .accessibilityLabel(option.label)
+            .accessibilityAddTraits(.isSelected)
+        } else {
+            Button {
+                Task { await model.applyQuickFilter(option) }
+            } label: {
+                quickFilterLabel(option, selected: false)
+            }
+            .buttonStyle(.glass)
+            .accessibilityLabel(option.label)
+        }
+    }
+
+    /// Chip copy. The 44 x 44 pt lane lives inside the button label, so the whole target is the
+    /// control's own content region (never a frame outside the style).
+    private func quickFilterLabel(_ option: SourceQuickFilter, selected: Bool) -> some View {
+        HStack(spacing: 4) {
+            if selected {
+                Image(systemName: "checkmark")
+                    .imageScale(.small)
+                    .accessibilityHidden(true)
+            }
+            Text(option.label)
+                .font(AppTheme.Typography.secondary)
+                .fontWeight(selected ? .bold : .semibold)
+                .lineLimit(1)
+        }
+        // The promoted glass fill is gold, so the copy keeps RN's dark gold label
+        // (FeedScreen.tsx:647) instead of the tinted label Liquid Glass would pick.
+        .foregroundStyle(selected ? AppTheme.goldAccentText : AppTheme.textPrimary)
+        .frame(
+            minWidth: AppTheme.Spacing.minimumHitTarget,
+            minHeight: AppTheme.Spacing.minimumHitTarget
+        )
+        .contentShape(Rectangle())
     }
 
     /// RN rendered RedGifs trending tags here (FeedScreen.tsx:397-423); the cards are the
@@ -626,99 +578,45 @@ struct FeedScreen: View {
         VStack(spacing: 12) {
             ProgressView()
                 .tint(AppTheme.primary)
-                .scaleEffect(1.4)
             Text("Loading posts...")
-                .font(.system(size: 14))
+                .font(AppTheme.Typography.secondary)
                 .foregroundStyle(AppTheme.textMuted)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func errorState(_ message: String) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 40))
-                .foregroundStyle(AppTheme.danger)
-            Text("Connection Error")
-                .font(.system(size: 18, weight: .bold))
-                .foregroundStyle(AppTheme.textPrimary)
+        ContentUnavailableView {
+            Label("Connection Error", systemImage: "exclamationmark.triangle.fill")
+        } description: {
             Text(friendlyMessage(message))
-                .font(.system(size: 13))
-                .foregroundStyle(AppTheme.textSecondary)
-                .multilineTextAlignment(.center)
-
-            HStack(spacing: 10) {
-                Button {
-                    Task { await model.retry() }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 14, weight: .semibold))
-                        Text("Retry")
-                            .font(.system(size: 14, weight: .bold))
-                    }
-                    .foregroundStyle(Color.white)
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 10)
-                    .background(AppTheme.primary, in: RoundedRectangle(cornerRadius: 12))
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    isSourceSheetOpen = true
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "square.stack.3d.up.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(AppTheme.primaryLight)
-                        Text("Change Source")
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundStyle(AppTheme.textPrimary)
-                    }
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 10)
-                    .background(AppTheme.surface, in: RoundedRectangle(cornerRadius: 12))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(AppTheme.border, lineWidth: 1)
-                    }
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Change source")
+        } actions: {
+            Button("Retry") {
+                Task { await model.retry() }
             }
-            .padding(.top, 4)
+            .buttonStyle(.glassProminent)
+            .tint(AppTheme.primary)
+
+            Button("Change Source") {
+                isSourceSheetOpen = true
+            }
+            .buttonStyle(.glass)
+            .accessibilityLabel("Change source")
         }
-        .padding(.horizontal, 32)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var emptyState: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "tray")
-                .font(.system(size: 38))
-                .foregroundStyle(AppTheme.textMuted)
-            Text("No posts found")
-                .font(.system(size: 18, weight: .bold))
-                .foregroundStyle(AppTheme.textPrimary)
+        ContentUnavailableView {
+            Label("No posts found", systemImage: "tray")
+        } description: {
             Text("Pull to refresh or try another source.")
-                .font(.system(size: 13))
-                .foregroundStyle(AppTheme.textSecondary)
-                .multilineTextAlignment(.center)
-            Button {
+        } actions: {
+            Button("Retry") {
                 Task { await model.retry() }
-            } label: {
-                Text("Retry")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(Color.white)
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 10)
-                    .background(AppTheme.primary, in: RoundedRectangle(cornerRadius: 12))
             }
-            .buttonStyle(.plain)
-            .padding(.top, 4)
+            .buttonStyle(.glassProminent)
+            .tint(AppTheme.primary)
         }
-        .padding(.horizontal, 32)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     /// RN rewrites certificate/timeout failures into an ISP/SSL hint

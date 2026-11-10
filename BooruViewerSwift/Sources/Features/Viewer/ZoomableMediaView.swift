@@ -1,15 +1,14 @@
 import SwiftUI
-import AVFoundation
 import Foundation
 import UIKit
 
 /// One page of the full-screen viewer: an image with pinch / double-tap zoom, a
-/// playing video, or a multi-page gallery/manga reader.
+/// native `AVPlayerViewController` video player, or a multi-page gallery/manga reader.
 ///
 /// Mirrors the per-page behaviour of RN `PostPageItem`
 /// (src/components/ImageViewerModal.tsx:800-1990): pinch and double-tap zoom for
-/// images, `AVPlayer` playback with mute + scrubber for videos, and a multi-page
-/// reader when the post carries gallery pages.
+/// images, native `AVKit` playback for videos, and a multi-page reader when the
+/// post carries gallery pages.
 struct ZoomableMediaView: View {
     let post: BooruPost
     let media: ResolvedMedia?
@@ -17,10 +16,10 @@ struct ZoomableMediaView: View {
     var isActive = true
     var isMangaMode = false
     var galleryPages: [URL] = []
-    /// Mirrors the viewer's controls visibility so the video transport card hides
-    /// together with `ViewerScreen`'s top/bottom bars.
-    var showsControls = true
-    /// Single tap on the media toggles the viewer controls (RN `handleToggleControls`).
+    /// Safe-area + top-toolbar insets applied only to the native video container so
+    /// images and manga stay full-bleed while video never slides under app chrome.
+    var videoSafeAreaInsets: UIEdgeInsets = .zero
+    /// Single tap on non-video media toggles the viewer controls (RN `handleToggleControls`).
     var onSingleTap: (() -> Void)?
     /// Reports pinch / double-tap zoom so the viewer can stand down its own
     /// dismissal drags while the media pan owns the touch.
@@ -36,13 +35,12 @@ struct ZoomableMediaView: View {
                     onZoomChanged: onZoomChanged
                 )
             } else if let videoURL = media?.videoURL {
-                PrivateVideoPlaybackView(
+                NativeVideoPlayerView(
                     url: videoURL,
                     isActive: isActive,
-                    showsControls: showsControls,
-                    onSingleTap: onSingleTap
+                    contentInsets: videoSafeAreaInsets
                 )
-                .id(videoURL)
+                .clipped()
             } else {
                 imagePage
             }
@@ -312,363 +310,6 @@ private func clampZoomOffset(
         width: min(max(offset.width, minX), maxX),
         height: min(max(offset.height, minY), maxY)
     )
-}
-
-// MARK: - Video playback
-
-/// `AVPlayer`-backed video page with play/pause, a scrubber and a mute toggle
-/// (RN video controls, ImageViewerModal.tsx:1993-2500).
-///
-/// The surface is a bare `AVPlayerLayer` (`AVPlayerSurfaceView`), so the native
-/// `AVPlayerViewController` transport bar never appears alongside these controls.
-/// Items are built through `MediaRequestConfiguration`, which means the request
-/// carries the per-host `Referer`/`User-Agent` and routes TLS-fragile CDNs through
-/// the worker; a failed playback retries once on the alternate leg.
-private struct PrivateVideoPlaybackView: View {
-    let url: URL
-    var isActive: Bool
-    /// Only show the transport card while the viewer's controls are visible.
-    var showsControls = true
-    var onSingleTap: (() -> Void)?
-
-    @State private var player: AVPlayer?
-    @State private var isPlaying = false
-    @State private var isMuted = false
-    @State private var currentTime: Double = 0
-    @State private var duration: Double = 0
-    @State private var isScrubbing = false
-    @State private var timeObserver: Any?
-    /// End-of-item observer, bound to the *object* of the current item so a
-    /// replaced item can never drive a stale loop.
-    @State private var endObserver: NSObjectProtocol?
-    /// Set once the alternate route leg has been tried, so a dead URL cannot loop.
-    @State private var didRetryAlternate = false
-    /// Set by `tearDown` so an in-flight seek completion never restarts a player
-    /// whose page has gone away.
-    @State private var isDisposed = false
-    /// Live mirror of `isActive`. The seek / notification completions capture this
-    /// view value, so reading the immutable `isActive` prop there could be stale;
-    /// `@State` storage stays current and tells the loop whether the page still
-    /// wants playback.
-    @State private var isPageActive = true
-
-    var body: some View {
-        ZStack {
-            Color.black
-
-            if let player {
-                // `.resizeAspect` keeps the whole frame visible (never cropped) and the
-                // surface fills the page, so the video is centred in the viewport.
-                AVPlayerSurfaceView(player: player, videoGravity: .resizeAspect)
-                    .ignoresSafeArea()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .onTapGesture { onSingleTap?() }
-                    .overlay(alignment: .bottom) {
-                        if isActive, showsControls {
-                            playbackControls(player)
-                                .padding(.horizontal, 16)
-                                // Clears `ViewerScreen.bottomBar` (manga / favorite
-                                // buttons) so the card never hides under it.
-                                .padding(.bottom, 96)
-                                .transition(.opacity)
-                        }
-                    }
-            } else {
-                ProgressView()
-                    .tint(AppTheme.textPrimary)
-            }
-        }
-        .onAppear(perform: setUp)
-        .onDisappear(perform: tearDown)
-        .onChange(of: url) { _, _ in
-            tearDown()
-            setUp()
-        }
-        .onChange(of: isActive) { _, active in
-            isPageActive = active
-            guard let player else { return }
-            if active {
-                // Coming back to a clip that already ran to the end must replay
-                // from the start instead of resuming at the final frame.
-                resumeFromStartIfEnded(player)
-            } else {
-                player.pause()
-                isPlaying = false
-            }
-        }
-    }
-
-    /// Classic transport card: scrubber row (time / slider / duration) plus a
-    /// button row (-10s / play-pause / +10s / mute), on a translucent surface.
-    ///
-    /// The transport group is centred on the card's own axis: the reserved side
-    /// slot is the same width on both edges, so `play` sits at
-    /// `viewport.midX` whether or not the trailing mute button is there, and the
-    /// flexible spacers keep the mute from colliding with `+10s` on a narrow
-    /// iPhone.
-    private func playbackControls(_ player: AVPlayer) -> some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 10) {
-                Text(Self.timeLabel(currentTime))
-                    .font(.caption2.monospacedDigit())
-                    .frame(width: 38, alignment: .leading)
-
-                Slider(
-                    value: Binding(
-                        get: { currentTime },
-                        set: { currentTime = $0 }
-                    ),
-                    in: 0...max(duration, 0.1),
-                    onEditingChanged: { editing in
-                        isScrubbing = editing
-                        if !editing {
-                            player.seek(to: CMTime(seconds: currentTime, preferredTimescale: 600))
-                        }
-                    }
-                )
-                .tint(AppTheme.primary)
-
-                Text(Self.timeLabel(duration))
-                    .font(.caption2.monospacedDigit())
-                    .frame(width: 38, alignment: .trailing)
-            }
-
-            HStack(spacing: 0) {
-                // Symmetric reservation: equal on both sides, so the play button's
-                // midX is the card's midX. The trailing slot only hosts mute.
-                Color.clear
-                    .frame(width: Self.transportSideSlot, height: 1)
-
-                Spacer(minLength: 0)
-
-                HStack(spacing: 18) {
-                    circleControl(system: "gobackward.10") { seek(player, by: -10) }
-                        .accessibilityLabel("Rewind 10 seconds")
-
-                    Button {
-                        togglePlayback(player)
-                    } label: {
-                        Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 20, weight: .bold))
-                            .foregroundStyle(AppTheme.textPrimary)
-                            .frame(width: 48, height: 48)
-                            .background(AppTheme.primary.opacity(0.9), in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(isPlaying ? "Pause" : "Play")
-                    .accessibilityIdentifier("viewer.playButton")
-
-                    circleControl(system: "goforward.10") { seek(player, by: 10) }
-                        .accessibilityLabel("Forward 10 seconds")
-                }
-                // Keeps the three transport buttons individually hittable while the
-                // group itself carries an identifier for UI tests.
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("viewer.transportControls")
-
-                Spacer(minLength: 0)
-
-                circleControl(system: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill") {
-                    toggleMute(player)
-                }
-                .accessibilityLabel(isMuted ? "Unmute" : "Mute")
-                .accessibilityIdentifier("viewer.muteButton")
-                .frame(width: Self.transportSideSlot, alignment: .trailing)
-            }
-            .foregroundStyle(AppTheme.textPrimary)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .background(AppTheme.surface.opacity(0.92), in: RoundedRectangle(cornerRadius: 16))
-    }
-
-    private func circleControl(system: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: system)
-                .font(.system(size: 17, weight: .semibold))
-                .frame(width: 36, height: 36)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    /// Width reserved on both ends of the transport row so the play button lands on
-    /// the card's midX. Matches a `circleControl` target.
-    private static let transportSideSlot: CGFloat = 36
-
-    // MARK: Player lifecycle
-
-    private func setUp() {
-        guard player == nil else { return }
-        didRetryAlternate = false
-        isDisposed = false
-        isPageActive = isActive
-        let newPlayer = AVPlayer(playerItem: MediaRequestConfiguration.makePlayerItem(for: url))
-        newPlayer.isMuted = isMuted
-        player = newPlayer
-        currentTime = 0
-        duration = 0
-        timeObserver = newPlayer.addPeriodicTimeObserver(
-            forInterval: CMTime(seconds: 0.5, preferredTimescale: 600),
-            queue: .main
-        ) { time in
-            // A relayed leg can fail mid-load; the alternate leg is tried once.
-            if newPlayer.currentItem?.status == .failed {
-                retryAlternateLeg()
-                return
-            }
-            guard !isScrubbing else { return }
-            let seconds = time.seconds
-            if seconds.isFinite {
-                currentTime = seconds
-            }
-            if let total = newPlayer.currentItem?.duration.seconds, total.isFinite, total > 0 {
-                duration = total
-            }
-        }
-        observeEndOfCurrentItem(of: newPlayer)
-        if isActive {
-            newPlayer.play()
-            isPlaying = true
-        }
-    }
-
-    /// Swaps in the other route leg (direct ⇄ relay) after a playback failure so
-    /// a TLS-fragile or relay-blocked source still plays. Runs at most once.
-    private func retryAlternateLeg() {
-        guard !didRetryAlternate, let player else { return }
-        didRetryAlternate = true
-        let attempts = MediaRequestConfiguration.routeAttempts(for: url)
-        guard attempts.count > 1 else { return }
-        let alternate = attempts[1]
-        player.replaceCurrentItem(with: MediaRequestConfiguration.makePlayerItem(for: alternate))
-        currentTime = 0
-        duration = 0
-        // The replaced item is a different object: re-bind the end observer to it.
-        observeEndOfCurrentItem(of: player)
-        if isActive {
-            player.play()
-            isPlaying = true
-        }
-    }
-
-    /// Loops a finished finite clip: observe `didPlayToEndTimeNotification` bound to
-    /// the current item object, seek back to zero, and resume only when the seek
-    /// really finished and nothing invalidated it meanwhile.
-    ///
-    /// The notification can be posted from a non-main thread, so every mutation in
-    /// the handler hops to the main actor. The previous observer is always removed
-    /// first, so a replaced item (URL change, episode switch, alternate-leg retry)
-    /// can never leave a stale loop behind and observers never multiply.
-    private func observeEndOfCurrentItem(of player: AVPlayer) {
-        removeEndObserver()
-        guard let item = player.currentItem else { return }
-        endObserver = NotificationCenter.default.addObserver(
-            forName: AVPlayerItem.didPlayToEndTimeNotification,
-            object: item,
-            queue: .main
-        ) { _ in
-            // Apple's docs note the notification may be posted from another thread;
-            // hop to the main actor before touching any UI state.
-            Task { @MainActor in
-                handlePlaybackReachedEnd()
-            }
-        }
-    }
-
-    private func removeEndObserver() {
-        if let endObserver {
-            NotificationCenter.default.removeObserver(endObserver)
-        }
-        endObserver = nil
-    }
-
-    /// Runs on the main actor after the current item played to its end. Restarts
-    /// from zero only if the clip is still the live one and the page still wants
-    /// playback; a paused, scrubbed, backgrounded or dismissed player stays put.
-    private func handlePlaybackReachedEnd() {
-        guard !isDisposed, let player, isPageActive, isPlaying, !isScrubbing else { return }
-        guard let item = player.currentItem else { return }
-        guard endObserver != nil else { return }
-
-        player.seek(
-            to: .zero,
-            toleranceBefore: .zero,
-            toleranceAfter: .zero
-        ) { finished in
-            // The completion can arrive on a background thread and after the player,
-            // its item, the active page or the user's intent changed; the seek is
-            // cancelled (`finished == false`) when another seek interrupted it.
-            Task { @MainActor in
-                guard finished, !isDisposed, isPageActive, isPlaying, !isScrubbing else { return }
-                guard let livePlayer = self.player, livePlayer === player,
-                      let liveItem = livePlayer.currentItem, liveItem === item else { return }
-                currentTime = 0
-                livePlayer.play()
-            }
-        }
-    }
-
-    /// Replays a clip that already ran to its end instead of leaving the page on
-    /// the final frame when the viewer pages back to it.
-    private func resumeFromStartIfEnded(_ player: AVPlayer) {
-        let current = player.currentTime().seconds
-        let total = player.currentItem?.duration.seconds ?? .nan
-        let reachedEnd = total.isFinite && total > 0 && current.isFinite && current >= total - 0.15
-        guard reachedEnd else {
-            player.play()
-            isPlaying = true
-            return
-        }
-        player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { finished in
-            Task { @MainActor in
-                guard finished, !isDisposed, isPageActive, let livePlayer = self.player else { return }
-                livePlayer.play()
-                isPlaying = true
-            }
-        }
-    }
-
-    private func tearDown() {
-        isDisposed = true
-        removeEndObserver()
-        if let timeObserver, let player {
-            player.removeTimeObserver(timeObserver)
-        }
-        timeObserver = nil
-        player?.pause()
-        player = nil
-        isPlaying = false
-    }
-
-    private func togglePlayback(_ player: AVPlayer) {
-        if isPlaying {
-            player.pause()
-            isPlaying = false
-        } else {
-            player.play()
-            isPlaying = true
-        }
-    }
-
-    private func toggleMute(_ player: AVPlayer) {
-        isMuted.toggle()
-        player.isMuted = isMuted
-    }
-
-    /// Relative seek (-10s / +10s), clamped to the clip bounds.
-    private func seek(_ player: AVPlayer, by delta: Double) {
-        let upperBound = duration > 0 ? duration : max(currentTime + delta, 0)
-        let target = min(max(currentTime + delta, 0), upperBound)
-        currentTime = target
-        player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
-    }
-
-    private static func timeLabel(_ seconds: Double) -> String {
-        guard seconds.isFinite, seconds > 0 else { return "0:00" }
-        let total = Int(seconds.rounded())
-        return String(format: "%d:%02d", total / 60, total % 60)
-    }
 }
 
 // MARK: - Multi-page gallery / manga reader

@@ -20,6 +20,11 @@ private struct KeypadKey: Identifiable {
 /// Mirrors `src/components/LockScreen.tsx`: dot indicators, error text with a shake,
 /// optional biometric key, optional cancel button, and the 3x4 keypad with letter hints.
 /// Haptics are intentionally absent: the native build has no haptics dependency yet.
+///
+/// Presentation is stock iOS 26: the keys and the close control are plain `Button`s in the
+/// system Liquid Glass styles (`.glass`, `.glassProminent`) with SF Symbols and semantic
+/// fonts. Nothing draws a hand-made circular control lookalike, and the 72 pt key lanes /
+/// 44 pt close lane are real layout so Dynamic Type only changes the glyph size.
 struct PINPadView: View {
     let title: String
     let subtitle: String
@@ -36,8 +41,11 @@ struct PINPadView: View {
     @State private var isSubmitting = false
     @State private var shakeCount: CGFloat = 0
 
-    private let gold = AppTheme.color(0xF5A623)
-    private let errorRed = AppTheme.color(0xFF4D4F)
+    /// Used only to drop the keypad's letter hints at accessibility sizes: the hints would
+    /// otherwise overflow the 72 pt key lane while the digit itself still fits.
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    private let pinErrorColor = AppTheme.danger
 
     init(
         title: String,
@@ -78,37 +86,41 @@ struct PINPadView: View {
     ]
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-
-            dots
-                .modifier(ShakeEffect(shakes: shakeCount))
-                .animation(.linear(duration: 0.45), value: shakeCount)
-
-            errorSlot
-
-            Spacer(minLength: 16)
-
-            keypad
-
-            footer
+        // The pad is ~634 pt tall at the default size and taller at accessibility sizes, so it
+        // scrolls only when it cannot fit. The `GeometryReader` measures the safe-area rect (the
+        // lock overlay is never `.ignoresSafeArea`d), and `minHeight` fills exactly that rect, so
+        // the pad is vertically centred below the Dynamic Island while it fits and otherwise
+        // keeps its natural height and scrolls from the top instead of clipping the header,
+        // keypad, or footer. Scroll content holds no unbounded `Spacer` and no negative padding.
+        GeometryReader { proxy in
+            ScrollView(.vertical) {
+                content
+                    // The scroll view hands its content an unbounded height, so the bound is
+                    // restated here: `minHeight` equals the safe-area height while the pad fits;
+                    // when the pad is taller its intrinsic height wins and it scrolls.
+                    .frame(minHeight: proxy.size.height, alignment: .center)
+            }
+            .scrollIndicators(.hidden)
+            .scrollBounceBehavior(.basedOnSize)
         }
-        .padding(.horizontal, 24)
-        .padding(.top, 20)
-        .padding(.bottom, 18)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(AppTheme.color(0x0D0E12).ignoresSafeArea())
+        // Semantic surface: under the lock screen's forced dark scheme this resolves to the
+        // system dark background, so the pad matches the opaque curtain instead of carrying
+        // its own hard-coded near-black. The curtain itself stays opaque (see `LockScreenView`).
+        .background(AppTheme.background.ignoresSafeArea())
         .overlay(alignment: .topTrailing) {
             if showsCancelButton, let onCancel {
                 Button(action: onCancel) {
                     Image(systemName: "xmark")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(AppTheme.textMuted)
-                        .frame(width: 44, height: 44)
+                        .frame(
+                            minWidth: AppTheme.Spacing.minimumHitTarget,
+                            minHeight: AppTheme.Spacing.minimumHitTarget
+                        )
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.glass)
                 .accessibilityLabel("Cancel")
+                .accessibilityIdentifier("passcode.closeButton")
                 .padding(.top, 8)
                 .padding(.trailing, 10)
             }
@@ -120,28 +132,52 @@ struct PINPadView: View {
         }
     }
 
+    /// The pad itself: header, dots, error slot, keypad, footer.
+    ///
+    /// No flexible `Spacer`: inside a `ScrollView` the proposal is unbounded, so a spacer
+    /// would either collapse or try to grow without limit. The 16 pt gap above the keypad is a
+    /// fixed `.padding`, and vertical centring comes from the host `frame(minHeight:)`, which
+    /// is skipped entirely when the content is taller than the safe area.
+    private var content: some View {
+        VStack(spacing: 0) {
+            header
+
+            dots
+                .modifier(ShakeEffect(shakes: shakeCount))
+                .animation(.linear(duration: 0.45), value: shakeCount)
+
+            errorSlot
+
+            keypad
+                .padding(.top, 16)
+
+            footer
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 20)
+        .padding(.bottom, 18)
+    }
+
     // MARK: - Header
 
     private var header: some View {
         VStack(spacing: 0) {
             Image(systemName: "lock.fill")
-                .font(.system(size: 26, weight: .semibold))
-                .foregroundStyle(gold)
-                .frame(width: 64, height: 64)
-                .background(gold.opacity(0.12), in: Circle())
-                .overlay(Circle().stroke(gold.opacity(0.3), lineWidth: 1.5))
+                .font(.system(.title, weight: .semibold))
+                .foregroundStyle(AppTheme.goldAccent)
+                .frame(minWidth: 64, minHeight: 64)
                 .padding(.bottom, 12)
+                .accessibilityHidden(true)
 
             Text(title)
-                .font(.system(size: 22, weight: .bold))
-                .kerning(-0.3)
+                .font(.system(.title2, weight: .bold))
                 .foregroundStyle(AppTheme.textPrimary)
                 .multilineTextAlignment(.center)
                 .padding(.bottom, 6)
 
             Text(subtitle)
-                .font(.system(size: 13))
-                .foregroundStyle(AppTheme.textMuted)
+                .font(AppTheme.Typography.secondary)
+                .foregroundStyle(AppTheme.textSecondary)
                 .multilineTextAlignment(.center)
                 .lineSpacing(3)
                 .frame(maxWidth: 280)
@@ -162,36 +198,29 @@ struct PINPadView: View {
         .accessibilityLabel("\(pin.count) of \(SecurityService.pinLength) digits entered")
     }
 
+    /// Filled dot = the accent; empty dot = a quiet semantic fill with a hairline. The
+    /// error state recolours the filled dots with the semantic danger colour.
     @ViewBuilder
     private func dotView(filled: Bool) -> some View {
-        if filled {
-            Circle()
-                .fill(isErrorState ? errorRed : gold)
-                .frame(width: 16, height: 16)
-                .overlay(
-                    Circle()
-                        .fill(Color.white.opacity(0.4))
-                        .padding(3)
+        Circle()
+            .fill(filled ? (isErrorState ? pinErrorColor : AppTheme.goldAccent) : AppTheme.chip)
+            .frame(width: 16, height: 16)
+            .overlay(
+                Circle().stroke(
+                    filled ? Color.clear : AppTheme.chipBorder,
+                    lineWidth: 1
                 )
-                .overlay(
-                    Circle().stroke(isErrorState ? errorRed : gold, lineWidth: 1.5)
-                )
-        } else {
-            Circle()
-                .fill(Color.white.opacity(0.05))
-                .frame(width: 16, height: 16)
-                .overlay(
-                    Circle().stroke(Color.white.opacity(0.25), lineWidth: 1.5)
-                )
-        }
+            )
     }
 
     private var errorSlot: some View {
         Text(errorText ?? " ")
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(errorRed)
+            .font(AppTheme.Typography.secondary.weight(.semibold))
+            .foregroundStyle(pinErrorColor)
             .multilineTextAlignment(.center)
-            .frame(height: 22)
+            // Minimum, not fixed: the slot reserves its line at default sizes and still grows
+            // instead of clipping the message at accessibility sizes.
+            .frame(minHeight: 22)
             .frame(maxWidth: .infinity)
             .opacity(errorText == nil ? 0 : 1)
             .accessibilityLabel(errorText ?? "")
@@ -215,27 +244,33 @@ struct PINPadView: View {
         .frame(maxWidth: .infinity)
     }
 
+    /// One digit key: native `.glass` button, the digit in a semantic font and the letter
+    /// hints as a caption. The 72 pt lane is the label, so the glass draws exactly the
+    /// control and the tap target is the whole key.
     private func keyButton(_ key: KeypadKey) -> some View {
         Button {
             press(key.digit)
         } label: {
             VStack(spacing: 1) {
                 Text(key.digit)
-                    .font(.system(size: 26, weight: .medium))
+                    .font(.system(.title2, weight: .medium))
                     .foregroundStyle(AppTheme.textPrimary)
-                if let letters = key.letters {
+                // Letter hints are decoration: at accessibility sizes they are dropped so the
+                // digit keeps the 72 pt lane instead of overflowing it.
+                if let letters = key.letters, !dynamicTypeSize.isAccessibilitySize {
                     Text(letters)
-                        .font(.system(size: 9, weight: .bold))
-                        .kerning(1.4)
-                        .foregroundStyle(Color.white.opacity(0.4))
+                        .font(AppTheme.Typography.caption)
+                        .foregroundStyle(AppTheme.textMuted)
                 }
             }
-            .frame(width: 72, height: 72)
-            .background(Color.white.opacity(0.07), in: Circle())
-            .overlay(Circle().stroke(Color.white.opacity(0.08), lineWidth: 1))
+            // A minimum lane, not a fixed one: at accessibility sizes the key grows with the
+            // digit instead of clipping it. 72 pt is the default-size keypad lane.
+            .frame(minWidth: 72, minHeight: 72)
             .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.glass)
+        // The native border shape makes the glass a circle; no hand-drawn fill or stroke.
+        .buttonBorderShape(.circle)
         .disabled(isSubmitting || isWorking)
         .accessibilityLabel(key.digit)
     }
@@ -253,17 +288,32 @@ struct PINPadView: View {
 
             if showsBiometricButton, let onBiometric {
                 Button(action: onBiometric) {
+                    // Explicit dark glyph: the prominent glass plate is tinted gold, and the
+                    // style's default glyph colour (white) is only ~2.09:1 on #F5A623, below
+                    // the 3:1 large-glyph floor. The brand's on-gold ink fixes the contrast
+                    // while the native style, plate, and 72 pt lane stay intact.
                     Image(systemName: "faceid")
-                        .font(.system(size: 26, weight: .medium))
-                        .foregroundStyle(gold)
-                        .frame(width: 72, height: 72)
+                        .font(.system(.title2, weight: .medium))
+                        .foregroundStyle(AppTheme.goldAccentText)
+                        .frame(minWidth: 72, minHeight: 72)
                         .contentShape(Circle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.glassProminent)
+                .buttonBorderShape(.circle)
+                // Gold plate for the primary unlock shortcut (the RN keypad's gold biometric
+                // key). The dark glyph above is what keeps the symbol legible on that plate.
+                .tint(AppTheme.goldAccent)
                 .disabled(isSubmitting || isWorking)
                 .accessibilityLabel("Unlock with biometrics")
             } else {
-                Color.clear.frame(width: 72, height: 72)
+                // Invisible stand-in for the biometric slot: it carries the same glyph metrics
+                // as the real key, so the zero stays centred with or without biometrics at any
+                // Dynamic Type size. Nothing is drawn and nothing is tappable.
+                Image(systemName: "faceid")
+                    .font(.system(.title2, weight: .medium))
+                    .frame(minWidth: 72, minHeight: 72)
+                    .hidden()
+                    .accessibilityHidden(true)
             }
         }
     }
@@ -275,14 +325,15 @@ struct PINPadView: View {
             deleteLast()
         } label: {
             Image(systemName: "delete.left")
-                .font(.system(size: 24, weight: .medium))
-                .foregroundStyle(canDelete ? AppTheme.textPrimary : AppTheme.color(0x686E7D))
-                .frame(width: 72, height: 72)
-                .background(Color.white.opacity(canDelete ? 0.07 : 0), in: Circle())
-                .overlay(Circle().stroke(Color.white.opacity(canDelete ? 0.08 : 0), lineWidth: 1))
+                .font(.system(.title3, weight: .medium))
+                .frame(minWidth: 72, minHeight: 72)
                 .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.glass)
+        // Same circle as the digit keys and the biometric key.
+        .buttonBorderShape(.circle)
+        // One disabled look only: `.disabled` dims the key and drops its interaction, so the
+        // key keeps its 72 pt lane and row geometry without a second manual `.opacity`.
         .disabled(!canDelete)
         .accessibilityLabel("Delete last digit")
     }
@@ -290,11 +341,11 @@ struct PINPadView: View {
     private var footer: some View {
         HStack(spacing: 6) {
             Image(systemName: "checkmark.shield")
-                .font(.system(size: 12, weight: .semibold))
+                .font(AppTheme.Typography.caption)
             Text("End-to-end on-device security")
-                .font(.system(size: 11, weight: .medium))
+                .font(AppTheme.Typography.caption)
         }
-        .foregroundStyle(AppTheme.color(0x686E7D))
+        .foregroundStyle(AppTheme.textMuted)
         .padding(.top, 10)
     }
 
@@ -360,10 +411,12 @@ private struct ShakeEffect: GeometryEffect {
 ///
 /// - `isLocked` mounts the PIN pad with the biometric key and the PIN fallback
 ///   (`LockScreen.tsx` unlock mode).
-/// - `isPrivacyCurtainVisible` draws the `#0D0E12` curtain **above** the pad, so an iOS
-///   system prompt never exposes app content and the pad survives the prompt
+/// - `isPrivacyCurtainVisible` draws an **opaque** curtain above the pad, so an iOS system
+///   prompt never exposes app content and the pad survives the prompt
 ///   (`App.tsx:265-266`). The pad is kept mounted while the curtain shows, which also keeps
-///   the biometric auto-prompt from being cancelled by the scene-phase change.
+///   the biometric auto-prompt from being cancelled by the scene-phase change. The curtain is
+///   deliberately *not* Liquid Glass: glass is translucent, and the whole point of the cover
+///   is that nothing behind the app's UI is readable while the scene is inactive.
 ///
 /// Usage: overlay it above the app content, e.g.
 /// `content.overlay { LockScreenView(controller: lockController) }`.
@@ -392,10 +445,13 @@ struct LockScreenView: View {
             if controller.isLocked || controller.isPrivacyCurtainVisible {
                 // Full-bleed opaque layer: it paints under the status bar/Dynamic Island and
                 // the home indicator, and swallows taps that land outside the safe area while
-                // the app is hidden.
-                AppTheme.color(0x0D0E12)
+                // the app is hidden. `AppTheme.background` is a fully opaque system colour
+                // (no material, no alpha), so nothing behind it is readable. Its appearance is
+                // never animated: a 150 ms fade would briefly show the app snapshot underneath.
+                AppTheme.background
                     .ignoresSafeArea()
                     .accessibilityHidden(true)
+                    .transaction { $0.animation = nil }
             }
 
             if controller.isLocked {
@@ -418,22 +474,30 @@ struct LockScreenView: View {
 
             if controller.isPrivacyCurtainVisible {
                 privacyCurtain
-                    .transition(.opacity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.easeInOut(duration: 0.15), value: controller.isPrivacyCurtainVisible)
+        // No container-level animation: every layer here is a security cover, so mounts and
+        // unmounts are immediate. The lock/shake animations live inside `PINPadView`.
         .preferredColorScheme(.dark)
     }
 
+    /// Opaque full-bleed cover: the same system background as the lock pad, plus a faint
+    /// shield watermark. Opaque by design (see the type docs), so no glass/material is used.
+    ///
+    /// There is no opacity transition: the cover has to be *immediately* opaque when the scene
+    /// goes inactive/background, so the whole subtree is mounted with animation disabled rather
+    /// than cross-fading in from transparent.
     private var privacyCurtain: some View {
         ZStack {
-            AppTheme.color(0x0D0E12)
+            // Bottom edge (home indicator region) included: `ignoresSafeArea` covers all edges.
+            AppTheme.background
                 .ignoresSafeArea()
             Image(systemName: "lock.shield")
-                .font(.system(size: 34, weight: .light))
-                .foregroundStyle(Color.white.opacity(0.1))
+                .font(.system(.largeTitle, weight: .light))
+                .foregroundStyle(AppTheme.textMuted.opacity(0.5))
         }
+        .transaction { $0.animation = nil }
         .accessibilityHidden(true)
     }
 }

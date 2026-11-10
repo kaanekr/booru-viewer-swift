@@ -1,8 +1,36 @@
 import SwiftUI
 import UIKit
 
+/// How a `SearchScreen` presents its native navigation chrome.
+///
+/// `.root` is the Search tab: it owns the native title, the source/filter toolbar controls,
+/// and the `.searchable` field. `.pushed` is a `SearchDetailScreen`, which supplies its own
+/// title and back button and therefore must not have a second title applied under it.
+enum SearchChromeMode: Sendable, Hashable {
+    case root
+    case pushed
+}
+
+private struct SearchChromeModeKey: EnvironmentKey {
+    static let defaultValue: SearchChromeMode = .root
+}
+
+extension EnvironmentValues {
+    /// Chrome ownership for `SearchScreen`; `.pushed` lets the host own the title.
+    var searchChromeMode: SearchChromeMode {
+        get { self[SearchChromeModeKey.self] }
+        set { self[SearchChromeModeKey.self] = newValue }
+    }
+}
+
 /// Search tab: tag input with debounced server autocomplete, recent-search chips, the filter sheet,
 /// and a two-column result grid. Mirrors RN `SearchScreen.tsx`.
+///
+/// Typing is a real `.searchable` field bound to `SearchViewModel.query`, so the system owns the
+/// search bar, its clear/cancel controls, and the suggestion overlay. Autocomplete rows are handed
+/// to `.searchSuggestions`, submitting the field runs `SearchViewModel.runSearch()` through
+/// `.onSubmit(of: .search)`, and `.searchFocused` binds the field's focus so a chip action can end
+/// the interaction. The source picker and the filter sheet are native toolbar buttons.
 ///
 /// The screen owns its `SearchViewModel`; `activeSourceID` is observed so a source change from the
 /// app layer resets the search, exactly like `FeedScreen`.
@@ -28,11 +56,14 @@ struct SearchScreen: View {
     @State private var isSourceSheetPresented = false
     @State private var pinnedTagKeys: Set<String> = []
     @State private var blacklistedTagKeys: Set<String> = []
+    /// Width measured from the results scroll view itself (never a `GeometryReader` wrapper),
+    /// so the masonry split follows the container while the native scroll edge stays intact.
+    @State private var availableWidth: CGFloat = 0
+    /// Bound to the native `.searchable` field via `.searchFocused`; autocomplete runs only
+    /// while the field is focused (SearchScreen.tsx:283-326).
     @FocusState private var isSearchFieldFocused: Bool
-    /// Measured height of the overlaid header; the lists reserve exactly this much space.
-    @State private var headerHeight: CGFloat = 64
-    /// Continuous collapse of the header, driven by the list scroll offset.
-    @State private var headerState = ScrollAwayHeaderState()
+    /// Set by the host: `.pushed` screens own their navigation title.
+    @Environment(\.searchChromeMode) private var chromeMode
 
     /// RN `POPULAR_TAGS` (SearchScreen.tsx:66-77) plus a wider set of community favourites,
     /// so the popular section fills the viewport instead of leaving the lower half empty.
@@ -47,8 +78,6 @@ struct SearchScreen: View {
     /// Grid metrics shared by the masonry split (FeedScreen.tsx:504).
     private static let columnSpacing: CGFloat = 12
     private static let horizontalPadding: CGFloat = AppTheme.Spacing.screenHorizontal
-    /// Named space the list offset readers measure against.
-    private static let listSpace = "searchList"
 
     /// - Parameters:
     ///   - activeSourceID: source the search opens on (RN default `gelbooru`).
@@ -101,123 +130,81 @@ struct SearchScreen: View {
         ))
     }
 
+    @ViewBuilder
     var body: some View {
-        ZStack(alignment: .top) {
-            AppTheme.background.ignoresSafeArea()
-
-            currentContent
-
-            ScrollAwayHeaderView(
-                slideOffset: isHeaderPinned ? 0 : headerState.slide,
-                isPinned: isHeaderPinned,
-                isHidden: !isHeaderPinned && headerState.isFullyCollapsed
-            ) {
-                header
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(AppTheme.background.ignoresSafeArea())
-        .onPreferenceChange(ScrollAwayHeaderHeightKey.self) { height in
-            if height > 0, abs(height - headerHeight) > 0.5 {
-                headerHeight = height
-            }
-        }
-        .onChange(of: headerHeight) { _, _ in
-            resetHeaderSlide()
-        }
-        .onChange(of: isHeaderPinned) { _, _ in
-            // Editing, autocomplete, and the sheets keep the bar in place; when the pin
-            // ends the baseline is dropped too, so the first scroll sample rebases
-            // instead of replaying the distance scrolled while editing.
-            resetHeaderSlide()
-        }
-        .onChange(of: model.isSearchActive) { _, _ in
-            resetHeaderSlide()
-        }
-        .onChange(of: model.sourceID) { _, _ in
-            // A source switch rebuilds the results and chips; start from a shown header.
-            resetHeaderSlide()
-        }
-        .onChange(of: model.filter) { _, _ in
-            // Applying filters re-runs the search, so the header comes back with the new
-            // active-tag chips instead of staying mid-slide.
-            resetHeaderSlide()
-        }
-        .task {
-            await model.start()
-            await reloadTagLists()
-        }
-        .onAppear { model.updateContext(context) }
-        .onChange(of: contextVersion) { _, _ in
-            // A Worker URL, API key, or quality edit pushes a fresh context into the model.
-            model.updateContext(context)
-        }
-        .onChange(of: isSearchFieldFocused) { _, focused in
-            model.inputFocusChanged(focused)
-        }
-        .onChange(of: activeSourceID) { _, newValue in
-            model.selectSource(newValue)
-        }
-        .sheet(isPresented: $isFilterSheetPresented) {
-            SearchFilterSheetView(config: filterBinding, sourceID: model.sourceID) { config in
-                model.applyFilter(config)
-            }
-        }
-        .sheet(isPresented: $isSourceSheetPresented) {
-            SourceSheetView(selectedSource: model.sourceID) { id in
-                isSourceSheetPresented = false
-                model.selectSource(id)
-            }
-            .presentationDetents([.medium, .large])
-            .presentationBackground(AppTheme.background)
+        if chromeMode == .root {
+            // The Search tab owns the title; the pushed detail screens supply their own.
+            content.navigationTitle("Search")
+        } else {
+            content
         }
     }
 
-    /// The header stays put while the field is being edited (keyboard, live autocomplete)
-    /// or a sheet is open, and only follows the list scroll otherwise.
-    private var isHeaderPinned: Bool {
-        isSearchFieldFocused || isFilterSheetPresented || isSourceSheetPresented
+    /// Shared chrome: the native search field, its suggestion overlay, the toolbar controls,
+    /// the sheets, and the model lifecycle. Only the title differs between root and pushed.
+    private var content: some View {
+        currentContent
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .searchable(
+                text: queryBinding,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: "Search tags or creators..."
+            )
+            .searchFocused($isSearchFieldFocused)
+            .searchSuggestions { suggestionRows }
+            // Environment-level input traits, the same ones the old inline field carried.
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .onSubmit(of: .search) {
+                // Same entry point as the old field's search key (SearchScreen.tsx:330-350).
+                isSearchFieldFocused = false
+                model.runSearch()
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    sourceToolbarButton
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    filterToolbarButton
+                }
+            }
+            .task {
+                await model.start()
+                await reloadTagLists()
+            }
+            .onAppear { model.updateContext(context) }
+            .onChange(of: contextVersion) { _, _ in
+                // A Worker URL, API key, or quality edit pushes a fresh context into the model.
+                model.updateContext(context)
+            }
+            .onChange(of: isSearchFieldFocused) { _, focused in
+                // Autocomplete stays tied to the field being active, as before.
+                model.inputFocusChanged(focused)
+            }
+            .onChange(of: activeSourceID) { _, newValue in
+                model.selectSource(newValue)
+            }
+            .sheet(isPresented: $isFilterSheetPresented) {
+                SearchFilterSheetView(config: filterBinding, sourceID: model.sourceID) { config in
+                    model.applyFilter(config)
+                }
+            }
+            .sheet(isPresented: $isSourceSheetPresented) {
+                SourceSheetView(selectedSource: model.sourceID) { id in
+                    isSourceSheetPresented = false
+                    model.selectSource(id)
+                }
+                .presentationDetents([.medium, .large])
+            }
     }
 
     @ViewBuilder
     private var currentContent: some View {
-        if isSearchFieldFocused, !model.suggestions.isEmpty {
-            suggestionList
-        } else if model.isSearchActive {
+        if model.isSearchActive {
             resultsContent
         } else {
             exploreContent
         }
-    }
-
-    /// Applies the shared offset tracking to one list: the named space plus the
-    /// continuous header update.
-    private func tracksHeaderScroll<V: View>(_ list: V) -> some View {
-        list
-            .coordinateSpace(name: Self.listSpace)
-            .onPreferenceChange(ScrollAwayOffsetKey.self) { offset in
-                updateHeader(for: offset)
-            }
-    }
-
-    /// Continuous header collapse: follows the content offset on every sample, so a
-    /// short first scroll already starts the slide and any upward move reveals it.
-    private func updateHeader(for offset: CGFloat) {
-        // Pinned (refresh, sheet, editing): the `.onChange(of: isHeaderPinned)` reset
-        // already revealed the bar and dropped the baseline, so ignore scroll samples.
-        guard !isHeaderPinned else { return }
-        headerState.update(offset: offset, height: headerHeight)
-    }
-
-    private func resetHeaderSlide() {
-        headerState.syncHeight(headerHeight)
-        headerState.reset()
-    }
-
-    /// Space reserved at the top of every list for the overlaid header, so the first
-    /// row starts below the controls and the inset never changes while it hides.
-    private var headerSpacer: some View {
-        Color.clear.frame(height: headerHeight)
     }
 
     private var filterBinding: Binding<SearchFilterConfig> {
@@ -227,101 +214,8 @@ struct SearchScreen: View {
         )
     }
 
-    // MARK: Header
-
-    private var header: some View {
-        VStack(spacing: AppTheme.Spacing.item) {
-            HStack(spacing: AppTheme.Spacing.item) {
-                sourcePill
-                searchField
-                filterButton
-            }
-            if onOpenTag != nil, !model.filter.tags.isEmpty {
-                activeTagChips
-            }
-        }
-        .padding(.horizontal, AppTheme.Spacing.screenHorizontal)
-        .padding(.top, AppTheme.Spacing.rowVertical)
-        .padding(.bottom, AppTheme.Spacing.item)
-        .background(AppTheme.background)
-    }
-
-    private var sourceEntry: SourceSheetView.Entry {
-        SourceSheetView.entry(for: model.sourceID)
-    }
-
-    private var sourcePill: some View {
-        Button {
-            isSearchFieldFocused = false
-            isSourceSheetPresented = true
-        } label: {
-            HStack(spacing: 5) {
-                Image(systemName: "square.stack.3d.up.fill")
-                    .font(.system(size: AppTheme.Icon.small, weight: .semibold))
-                    .foregroundStyle(AppTheme.primaryLight)
-                Text(sourceEntry.shortName)
-                    .font(AppTheme.Typography.caption)
-                    .foregroundStyle(AppTheme.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            .padding(.horizontal, AppTheme.Spacing.chipHorizontal)
-            .padding(.vertical, AppTheme.Spacing.chipVertical)
-            .background(AppTheme.surface, in: Capsule())
-            .overlay {
-                Capsule().stroke(AppTheme.border, lineWidth: 1)
-            }
-            // Compact visual, full-size tap target.
-            .frame(minHeight: AppTheme.Spacing.minimumHitTarget)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Current source: \(sourceEntry.name). Change source")
-    }
-
-    private var searchField: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: AppTheme.Icon.small, weight: .semibold))
-                .foregroundStyle(AppTheme.textMuted)
-
-            TextField("Search tags or creators...", text: queryBinding)
-                .focused($isSearchFieldFocused)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .submitLabel(.search)
-                .font(AppTheme.Typography.body)
-                .foregroundStyle(AppTheme.textPrimary)
-                .onSubmit {
-                    isSearchFieldFocused = false
-                    model.runSearch()
-                }
-
-            if !model.query.isEmpty {
-                Button {
-                    model.setQuery("")
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: AppTheme.Icon.small))
-                        .foregroundStyle(AppTheme.textMuted)
-                        // 44pt target inside the field, without inflating the bar.
-                        .frame(width: AppTheme.Spacing.minimumHitTarget, height: AppTheme.Spacing.minimumHitTarget)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Clear search text")
-            }
-        }
-        .padding(.horizontal, 10)
-        // The field surface itself is the 44pt target, so the bar stays compact.
-        .frame(minHeight: AppTheme.Spacing.minimumHitTarget)
-        .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 12))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(isSearchFieldFocused ? AppTheme.primary : AppTheme.border, lineWidth: 1)
-        }
-    }
-
+    /// The native field's text. Writing goes through `setQuery` so the debounced server
+    /// autocomplete reschedules on every keystroke (SearchScreen.tsx:283-326).
     private var queryBinding: Binding<String> {
         Binding(
             get: { model.query },
@@ -329,24 +223,126 @@ struct SearchScreen: View {
         )
     }
 
-    private var filterButton: some View {
+    // MARK: Toolbar
+
+    private var sourceEntry: SourceSheetView.Entry {
+        SourceSheetView.entry(for: model.sourceID)
+    }
+
+    /// Native toolbar source switcher; it opens the system sheet picker. The compact source
+    /// name stays visible next to the glyph, matching the old header pill.
+    private var sourceToolbarButton: some View {
+        Button {
+            isSearchFieldFocused = false
+            isSourceSheetPresented = true
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "square.stack.3d.up.fill")
+                Text(sourceEntry.shortName)
+                    .font(AppTheme.Typography.caption)
+                    .lineLimit(1)
+            }
+        }
+        .accessibilityLabel("Current source: \(sourceEntry.name). Change source")
+        .accessibilityIdentifier("search.sourceButton")
+    }
+
+    /// Native toolbar filter control; the filled glyph marks active structured options.
+    private var filterToolbarButton: some View {
         Button {
             isSearchFieldFocused = false
             isFilterSheetPresented = true
         } label: {
-            Image(systemName: "slider.horizontal.3")
-                .font(.system(size: AppTheme.Icon.standard, weight: .semibold))
-                .foregroundStyle(model.hasCustomFilters ? AppTheme.primaryLight : AppTheme.textSecondary)
-                .frame(width: AppTheme.Spacing.minimumHitTarget, height: AppTheme.Spacing.minimumHitTarget)
-                .background(AppTheme.surface, in: RoundedRectangle(cornerRadius: 12))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(model.hasCustomFilters ? AppTheme.primary : AppTheme.border, lineWidth: 1)
-                }
-                .contentShape(RoundedRectangle(cornerRadius: 12))
+            Label(
+                "Search filters",
+                systemImage: model.hasCustomFilters
+                    ? "line.3.horizontal.decrease.circle.fill"
+                    : "line.3.horizontal.decrease.circle"
+            )
         }
-        .buttonStyle(.plain)
         .accessibilityLabel("Search filters")
+        .accessibilityIdentifier("search.filterButton")
+    }
+
+    // MARK: Autocomplete
+
+    /// Autocomplete rows for the system suggestion overlay. Selecting one keeps the
+    /// token-aware rewrite and runs the search, exactly like the old inline list.
+    ///
+    /// Empty results produce no rows at all, so a focused field with nothing to suggest
+    /// never shows an empty overlay; the model still cancels tasks on source change.
+    @ViewBuilder
+    private var suggestionRows: some View {
+        if !model.suggestions.isEmpty {
+            ForEach(model.suggestions, id: \.name) { suggestion in
+                Button {
+                    isSearchFieldFocused = false
+                    model.applySuggestion(suggestion, immediateSearch: true)
+                } label: {
+                    HStack(spacing: AppTheme.Spacing.item) {
+                        Circle()
+                            .fill(AppTheme.tagColor(for: suggestion.category))
+                            .frame(width: 8, height: 8)
+                        Text(suggestion.name)
+                            .lineLimit(1)
+                            .foregroundStyle(AppTheme.textPrimary)
+                        Spacer(minLength: AppTheme.Spacing.item)
+                        Text(TagChipView.abbreviated(suggestion.postCount))
+                            .font(AppTheme.Typography.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(AppTheme.textMuted)
+                    }
+                    .frame(minHeight: AppTheme.Spacing.minimumHitTarget)
+                    .contentShape(Rectangle())
+                }
+                .accessibilityLabel(
+                    "\(suggestion.name.replacingOccurrences(of: "_", with: " ")), "
+                        + "\(TagChipView.abbreviated(suggestion.postCount)) posts"
+                )
+            }
+        }
+    }
+
+    // MARK: Results
+
+    private var resultsContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.section) {
+                if onOpenTag != nil, !model.filter.tags.isEmpty {
+                    activeTagChips
+                }
+                if model.isLoading {
+                    loadingState
+                } else if let message = model.errorMessage {
+                    errorState(message)
+                } else {
+                    if !model.results.isEmpty {
+                        grid(columnWidth: Self.columnWidth(for: availableWidth))
+                    }
+                    if model.isLoadingMore {
+                        ProgressView()
+                            .tint(AppTheme.primary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                    } else if model.blacklistedCount > 0, !model.filter.includeBlacklisted {
+                        hiddenPostsButton
+                    }
+                }
+            }
+            .padding(.horizontal, Self.horizontalPadding)
+            .padding(.bottom, 12)
+        }
+        .scrollIndicators(.hidden)
+        .scrollDismissesKeyboard(.interactively)
+        // Width comes from the scroll view itself, so no `GeometryReader` wraps it and the
+        // native navigation stack keeps the scroll edge and collapsing title.
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.width
+        } action: { width in
+            guard width.isFinite, width > 0 else { return }
+            guard abs(width - availableWidth) > 0.5 else { return }
+            availableWidth = width
+        }
     }
 
     private var activeTagChips: some View {
@@ -371,100 +367,41 @@ struct SearchScreen: View {
         .scrollIndicators(.hidden)
     }
 
-    // MARK: Autocomplete
-
-    private var suggestionList: some View {
-        tracksHeaderScroll(
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    headerSpacer
-                    ForEach(model.suggestions, id: \.name) { suggestion in
-                        Button {
-                            isSearchFieldFocused = false
-                            model.applySuggestion(suggestion, immediateSearch: true)
-                        } label: {
-                            HStack(spacing: 10) {
-                                Circle()
-                                    .fill(AppTheme.tagColor(for: suggestion.category))
-                                    .frame(width: 8, height: 8)
-                                Text(suggestion.name)
-                                    .font(AppTheme.Typography.body)
-                                    .lineLimit(1)
-                                    .foregroundStyle(AppTheme.textPrimary)
-                                Spacer(minLength: 8)
-                                Text(TagChipView.abbreviated(suggestion.postCount))
-                                    .font(AppTheme.Typography.caption)
-                                    .foregroundStyle(AppTheme.textMuted)
-                            }
-                            .padding(.horizontal, AppTheme.Spacing.screenHorizontal)
-                            .padding(.vertical, AppTheme.Spacing.rowVertical)
-                            // Rows stay comfortably tappable while the text gets smaller.
-                            .frame(minHeight: AppTheme.Spacing.minimumHitTarget)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-
-                        Divider().overlay(AppTheme.divider)
-                    }
-                }
-                .scrollAwayOffsetReader(space: Self.listSpace)
-            }
-            .scrollDismissesKeyboard(.immediately)
-        )
-    }
-
-    // MARK: Results
-
-    private var resultsContent: some View {
-        GeometryReader { geometry in
-            let columnWidth = Self.columnWidth(for: geometry.size.width)
-            tracksHeaderScroll(
-                ScrollView {
-                    LazyVStack(spacing: AppTheme.Spacing.section) {
-                        headerSpacer
-                        if model.isLoading {
-                            loadingState
-                        } else if let message = model.errorMessage {
-                            errorState(message)
-                        } else {
-                            if !model.results.isEmpty {
-                                grid(columnWidth: columnWidth)
-                            }
-                            if model.isLoadingMore {
-                                ProgressView()
-                                    .tint(AppTheme.primary)
-                                    .padding(.vertical, 12)
-                            } else if model.blacklistedCount > 0, !model.filter.includeBlacklisted {
-                                hiddenPostsButton
-                            }
-                        }
-                    }
-                    .padding(.horizontal, Self.horizontalPadding)
-                    .padding(.bottom, 12)
-                    .scrollAwayOffsetReader(space: Self.listSpace)
-                }
-                .scrollIndicators(.hidden)
-                .scrollDismissesKeyboard(.interactively)
-            )
-        }
-    }
-
     /// Two height-balanced columns (same `MasonryColumns` pass as `FeedScreen`),
     /// so tall cards never leave holes under the shorter column.
     private func grid(columnWidth: CGFloat) -> some View {
-        var masonry = MasonryColumns()
-        let columns = masonry.layout(model.results) { post in
-            MasonryColumns.estimatedHeight(for: post, columnWidth: columnWidth)
-        }
+        let columns = Self.masonrySplit(model.results, columnWidth: columnWidth)
         return HStack(alignment: .top, spacing: Self.columnSpacing) {
             ForEach(columns.indices, id: \.self) { index in
-                LazyVStack(spacing: Self.columnSpacing) {
-                    ForEach(columns[index]) { post in
-                        card(for: post)
-                    }
-                }
-                .frame(width: columnWidth > 0 ? columnWidth : nil, alignment: .top)
+                columnFrame(
+                    LazyVStack(spacing: Self.columnSpacing) {
+                        ForEach(columns[index]) { post in
+                            card(for: post)
+                        }
+                    },
+                    width: columnWidth
+                )
             }
+        }
+    }
+
+    /// Before the first width sample there is no measured column, so the columns take an equal
+    /// share of the container instead of collapsing to a zero frame; the measured pass
+    /// replaces it as soon as `onGeometryChange` reports a real width.
+    @ViewBuilder
+    private func columnFrame<V: View>(_ content: V, width: CGFloat) -> some View {
+        if width > 0 {
+            content.frame(width: width, alignment: .top)
+        } else {
+            content.frame(maxWidth: .infinity, alignment: .top)
+        }
+    }
+
+    /// Greedy height-balanced split (pure, so the render pass never mutates state).
+    private static func masonrySplit(_ posts: [BooruPost], columnWidth: CGFloat) -> [[BooruPost]] {
+        var masonry = MasonryColumns()
+        return masonry.layout(posts) { post in
+            MasonryColumns.estimatedHeight(for: post, columnWidth: columnWidth)
         }
     }
 
@@ -497,60 +434,58 @@ struct SearchScreen: View {
         Button {
             model.showBlacklistedPosts()
         } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "eye.slash")
-                Text("Show \(model.blacklistedCount) hidden posts")
-            }
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(AppTheme.textSecondary)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 11)
-            .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 12))
+            Label("Show \(model.blacklistedCount) hidden posts", systemImage: "eye.slash")
+                .font(AppTheme.Typography.secondary)
+                .frame(maxWidth: .infinity, minHeight: AppTheme.Spacing.minimumHitTarget)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.glass)
     }
 
     private var loadingState: some View {
         VStack(spacing: 10) {
             ProgressView()
                 .tint(AppTheme.primary)
-                .scaleEffect(1.2)
             Text("Searching results...")
-                .font(.system(size: 13))
+                .font(AppTheme.Typography.secondary)
                 .foregroundStyle(AppTheme.textMuted)
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 60)
     }
 
+    /// Result errors and the "no results" page share one native state view; the model reports an
+    /// empty page as the message "No results found" (SearchViewModel `apply(_:isFirstPage:)`).
+    @ViewBuilder
     private func errorState(_ message: String) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 36))
-                .foregroundStyle(AppTheme.danger)
-            Text(message)
-                .font(.system(size: 13))
-                .foregroundStyle(AppTheme.textSecondary)
-                .multilineTextAlignment(.center)
-            Button {
-                model.runSearch()
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 13, weight: .semibold))
-                    Text("Retry")
-                        .font(.system(size: 14, weight: .bold))
-                }
-                .foregroundStyle(Color.white)
-                .padding(.horizontal, 18)
-                .padding(.vertical, 10)
-                .background(AppTheme.primary, in: RoundedRectangle(cornerRadius: 12))
+        if message == "No results found" {
+            ContentUnavailableView {
+                Label("No results found", systemImage: "magnifyingglass")
+            } description: {
+                Text("Try different tags or adjust the filters.")
+            } actions: {
+                retryButton
             }
-            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity)
+            .padding(.top, 32)
+        } else {
+            ContentUnavailableView {
+                Label("Search Failed", systemImage: "exclamationmark.triangle.fill")
+            } description: {
+                Text(message)
+            } actions: {
+                retryButton
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.top, 32)
         }
-        .padding(.horizontal, 32)
-        .frame(maxWidth: .infinity)
-        .padding(.top, 48)
+    }
+
+    private var retryButton: some View {
+        Button("Retry") {
+            model.runSearch()
+        }
+        .buttonStyle(.glassProminent)
+        .tint(AppTheme.primary)
     }
 
     private func open(_ post: BooruPost) {
@@ -561,22 +496,18 @@ struct SearchScreen: View {
     // MARK: Explore
 
     private var exploreContent: some View {
-        tracksHeaderScroll(
-            ScrollView {
-                VStack(alignment: .leading, spacing: AppTheme.Spacing.section) {
-                    headerSpacer
-                    if !model.history.isEmpty {
-                        recentSearches
-                    }
-                    popularTagsSection
+        ScrollView {
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.section) {
+                if !model.history.isEmpty {
+                    recentSearches
                 }
-                .padding(.horizontal, AppTheme.Spacing.screenHorizontal)
-                .padding(.bottom, AppTheme.Spacing.section)
-                .scrollAwayOffsetReader(space: Self.listSpace)
+                popularTagsSection
             }
-            .scrollIndicators(.hidden)
-            .scrollDismissesKeyboard(.interactively)
-        )
+            .padding(.horizontal, AppTheme.Spacing.screenHorizontal)
+            .padding(.bottom, AppTheme.Spacing.section)
+        }
+        .scrollIndicators(.hidden)
+        .scrollDismissesKeyboard(.interactively)
     }
 
     private var recentSearches: some View {

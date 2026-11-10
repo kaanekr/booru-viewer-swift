@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import UIKit
 
 /// Full-screen paged media viewer, pushed from the Explore / Search / Favorites
 /// grids. Mirrors RN `ViewerScreen` + `ImageViewerModal` as a stack screen
@@ -29,9 +30,54 @@ struct ViewerScreen: View {
     /// release handling knows the strip claimed the touch
     /// (ImageViewerModal.tsx:288-324).
     @State private var isEdgeDrag = false
-    /// Mirrors the visible page's zoom so the viewer's own drags stand down while
-    /// the media pan gesture owns the touch.
+    /// Live mirror of the visible page's zoom so the viewer's own drags stand down
+    /// while the media pan gesture owns the touch.
     @State private var isMediaZoomed = false
+
+    /// True physical device safe-area insets read outside the safe-area crop so
+    /// images and manga stay full-bleed while video stays inset below app chrome
+    /// and above the home indicator.
+    @State private var screenSafeInsets = SafeInsets()
+    /// Measured height of the floating top Liquid Glass bar.
+    @State private var topChromeHeight: CGFloat = 56
+
+    private struct SafeInsets: Equatable, Sendable {
+        var top: CGFloat = 0
+        var leading: CGFloat = 0
+        var bottom: CGFloat = 0
+        var trailing: CGFloat = 0
+
+        init() {}
+
+        init(_ insets: EdgeInsets) {
+            top = insets.top
+            leading = insets.leading
+            bottom = insets.bottom
+            trailing = insets.trailing
+        }
+    }
+
+    private var isCurrentPostVideo: Bool {
+        guard let post = viewModel.currentPost else { return false }
+        let isManga = viewModel.isMangaMode && viewModel.galleryPages(for: post).count > 1
+        return !isManga && viewModel.media(for: post)?.videoURL != nil
+    }
+
+    /// Video pages keep the top app bar visible (outside the player bounds) because
+    /// single taps on video belong to `AVPlayerViewController`; images and manga
+    /// toggle chrome visibility on single tap.
+    private var isChromeVisible: Bool {
+        isCurrentPostVideo || showControls
+    }
+
+    private var videoPlayerInsets: UIEdgeInsets {
+        UIEdgeInsets(
+            top: screenSafeInsets.top + topChromeHeight,
+            left: screenSafeInsets.leading,
+            bottom: screenSafeInsets.bottom,
+            right: screenSafeInsets.trailing
+        )
+    }
 
     init(
         posts: [BooruPost],
@@ -72,6 +118,17 @@ struct ViewerScreen: View {
         let vm = viewModel
 
         ZStack {
+            // Non-interactive full-bleed probe measures the true device safe area
+            // while keeping `topBarOverlay` itself constrained inside safe area.
+            Color.clear
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+                .onGeometryChange(for: SafeInsets.self) { proxy in
+                    SafeInsets(proxy.safeAreaInsets)
+                } action: { insets in
+                    screenSafeInsets = insets
+                }
+
             // The backdrop is always the opaque theme background and never moves:
             // the viewer is presented in a `fullScreenCover`, so there is nothing
             // behind it and following the finger would expose a black band
@@ -89,7 +146,7 @@ struct ViewerScreen: View {
                         isActive: index == viewModel.currentIndex,
                         isMangaMode: viewModel.isMangaMode && index == viewModel.currentIndex,
                         galleryPages: viewModel.galleryPages(for: post),
-                        showsControls: showControls,
+                        videoSafeAreaInsets: videoPlayerInsets,
                         onSingleTap: { toggleControls() },
                         onZoomChanged: { zoomed in isMediaZoomed = zoomed }
                     )
@@ -103,21 +160,32 @@ struct ViewerScreen: View {
             .offset(y: verticalDragOffset)
             .opacity(mediaOpacity)
             // Simultaneous so the `.page` `TabView` keeps its own horizontal
-            // paging; the drag only acts after deciding it owns the touch
-            // (dominant axis beyond the ratio below).
-            .simultaneousGesture(verticalDismissGesture)
+            // paging; disabled on active video via `isEnabled:` (without affecting
+            // subview native `AVPlayerViewController` gestures).
+            .simultaneousGesture(
+                verticalDismissGesture,
+                isEnabled: !isCurrentPostVideo
+            )
 
             edgeDismissStrip
 
-            overlays
+            topBarOverlay
+
+            toastOverlay
         }
-        .statusBarHidden(!showControls)
-        .animation(.easeInOut(duration: 0.2), value: showControls)
+        .statusBarHidden(!isChromeVisible)
+        .animation(.easeInOut(duration: 0.2), value: isChromeVisible)
         .onChange(of: vm.currentIndex) { _, _ in
             resetPagerGestures()
         }
         .onChange(of: isMediaZoomed) { _, zoomed in
             if zoomed { resetVerticalDrag() }
+        }
+        .onChange(of: isCurrentPostVideo) { _, isVideo in
+            if isVideo {
+                resetVerticalDrag()
+                isEdgeDrag = false
+            }
         }
         .task(id: vm.currentIndex) { [vm] in
             await vm.prepareCurrentPage()
@@ -201,7 +269,7 @@ struct ViewerScreen: View {
     /// backdrop cannot move (see `body`), so dismissal is decided on release.
     @ViewBuilder
     private var edgeDismissStrip: some View {
-        if viewModel.currentIndex == 0, !isMediaZoomed {
+        if viewModel.currentIndex == 0, !isMediaZoomed, !isCurrentPostVideo {
             Color.clear
                 .frame(width: Self.edgeStripWidth)
                 .frame(maxHeight: .infinity)
@@ -243,10 +311,10 @@ struct ViewerScreen: View {
     }
 
     /// Vertical dismissal is suspended while the page is zoomed (the media pan owns
-    /// the drag) and inside the multi-page reader, whose scroll view owns vertical
-    /// drags (ImageViewerModal.tsx:1345).
+    /// the drag), inside the multi-page reader (whose scroll view owns vertical drags),
+    /// and on active video pages (`AVPlayerViewController` owns vertical interactions).
     private var isVerticalDismissSuspended: Bool {
-        isMediaZoomed || viewModel.isMangaMode
+        isMediaZoomed || viewModel.isMangaMode || isCurrentPostVideo
     }
 
     /// Fades the media as it is pulled off screen, like RN's dismiss transition.
@@ -291,172 +359,183 @@ struct ViewerScreen: View {
         verticalDragOffset = 0
     }
 
-    // MARK: Overlays
+    // MARK: Native Liquid Glass Top Bar Chrome
 
-    private var overlays: some View {
-        ZStack(alignment: .top) {
-            VStack {
-                if showControls {
-                    topBar
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                    episodeSelectorBar
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                }
-                Spacer()
-                if showControls {
-                    bottomBar
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
+    /// All app actions live in a single native iOS 26 Liquid Glass top bar inside
+    /// the top safe area. On video pages, `NativeVideoPlayerView` is inset below this
+    /// bar so player transport and top AVKit controls are never overlapped; images
+    /// and manga remain full-bleed underneath. Exactly one info button exists.
+    private var topBarOverlay: some View {
+        VStack(spacing: 0) {
+            if isChromeVisible {
+                topBar
+                    .padding(.horizontal, 12)
+                    .padding(.top, 6)
+                    .padding(.bottom, 6)
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.size.height
+                    } action: { height in
+                        if height > 0 {
+                            topChromeHeight = height
+                        }
+                    }
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-
-            toast
+            Spacer(minLength: 0)
         }
     }
 
-    /// The only info control in the viewer chrome: `bottomBar` keeps just the
-    /// manga and favorite actions, so exactly one actionable info button is
-    /// visible at a time (`showControls` gates the whole chrome).
     private var topBar: some View {
-        HStack(spacing: 12) {
-            circleButton(system: "xmark") { onClose() }
+        GlassEffectContainer(spacing: 6) {
+            HStack(spacing: 6) {
+                glassCircleButton(
+                    system: "xmark",
+                    tint: AppTheme.textPrimary
+                ) {
+                    onClose()
+                }
                 .accessibilityLabel("Close")
                 .accessibilityIdentifier("viewer.closeButton")
 
-            Spacer(minLength: 0)
-
-            badge
-
-            Spacer(minLength: 0)
-
-            circleButton(
-                system: "info.circle",
-                tint: showInfo ? AppTheme.primary : AppTheme.textPrimary
-            ) {
-                showInfo = true
-            }
-            .accessibilityLabel("Post info")
-            .accessibilityIdentifier("viewer.infoButton")
-        }
-    }
-
-    private var badge: some View {
-        VStack(spacing: 1) {
-            Text(viewModel.currentPost?.sourceName ?? "Booru")
-                .font(.caption.weight(.semibold))
-                .lineLimit(1)
-            Text("\(viewModel.currentIndex + 1) / \(viewModel.posts.count)")
-                .font(.caption2)
-        }
-        .foregroundStyle(AppTheme.textPrimary)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 6)
-        .background(AppTheme.surface.opacity(0.9), in: Capsule())
-    }
-
-    private var bottomBar: some View {
-        HStack(spacing: 14) {
-            if viewModel.canShowMangaMode {
-                circleButton(
-                    system: viewModel.isMangaMode ? "book.fill" : "book",
-                    tint: viewModel.isMangaMode ? AppTheme.primary : AppTheme.textPrimary
-                ) {
-                    viewModel.isMangaMode.toggle()
+                if let post = viewModel.currentPost, !viewModel.episodes(for: post).isEmpty {
+                    episodeMenu(for: post)
+                } else if viewModel.canShowMangaMode {
+                    mangaModeButton
                 }
-                .accessibilityLabel(viewModel.isMangaMode ? "Exit manga mode" : "Manga mode")
-            }
 
-            Spacer(minLength: 0)
+                Spacer(minLength: 4)
 
-            if let post = viewModel.currentPost {
-                let isFavorite = viewModel.isFavorite(post)
-                // No info button here: the top bar owns the single info control.
-                circleButton(
-                    system: isFavorite ? "heart.fill" : "heart",
-                    tint: isFavorite ? AppTheme.danger : AppTheme.textPrimary
-                ) {
-                    Task { await viewModel.toggleFavorite() }
-                }
-                .accessibilityLabel(isFavorite ? "Remove favorite" : "Add favorite")
-                .disabled(viewModel.savingFavorite)
-            }
-        }
-    }
+                badge
 
-    // MARK: HentaiHaven episode selector
+                Spacer(minLength: 4)
 
-    /// Horizontal episode chips shown under the top bar for HentaiHaven series
-    /// posts; tapping one switches the stream immediately.
-    @ViewBuilder
-    private var episodeSelectorBar: some View {
-        if let post = viewModel.currentPost {
-            let episodes = viewModel.episodes(for: post)
-            if !episodes.isEmpty {
-                let selectedID = viewModel.selectedEpisode(for: post)?.id
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(episodes) { episode in
-                            let isSelected = episode.id == selectedID
-                            Button {
-                                viewModel.selectEpisode(episode, for: post)
-                            } label: {
-                                Text("Ep \(episode.number)")
-                                    .font(.footnote.weight(.semibold))
-                                    .foregroundStyle(isSelected ? AppTheme.textPrimary : AppTheme.textSecondary)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
-                                    .background(
-                                        isSelected ? AppTheme.primary : AppTheme.surface.opacity(0.9),
-                                        in: Capsule()
-                                    )
-                                    .overlay(
-                                        Capsule().stroke(
-                                            isSelected ? AppTheme.primary : AppTheme.border,
-                                            lineWidth: 1
-                                        )
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                        }
+                if let post = viewModel.currentPost {
+                    let isFavorite = viewModel.isFavorite(post)
+                    glassCircleButton(
+                        system: isFavorite ? "heart.fill" : "heart",
+                        tint: isFavorite ? AppTheme.danger : AppTheme.textPrimary
+                    ) {
+                        Task { await viewModel.toggleFavorite() }
                     }
-                    .padding(.vertical, 2)
+                    .disabled(viewModel.savingFavorite)
+                    .accessibilityLabel(isFavorite ? "Remove favorite" : "Add favorite")
+                    .accessibilityIdentifier("viewer.favoriteButton")
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+
+                glassCircleButton(
+                    system: "info.circle",
+                    tint: showInfo ? AppTheme.primary : AppTheme.textPrimary
+                ) {
+                    showInfo = true
+                }
+                .accessibilityLabel("Post info")
+                .accessibilityIdentifier("viewer.infoButton")
             }
         }
     }
 
-    private var toast: some View {
-        Group {
-            if let message = viewModel.toastMessage {
-                Text(message)
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(AppTheme.textPrimary)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(AppTheme.surface, in: Capsule())
-                    .overlay(Capsule().stroke(AppTheme.primary, lineWidth: 1))
-                    .padding(.top, 64)
-            }
-        }
-    }
-
-    // MARK: Controls
-
-    private func circleButton(
+    private func glassCircleButton(
         system: String,
-        tint: Color = AppTheme.textPrimary,
+        tint: Color,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             Image(systemName: system)
-                .font(.system(size: 17, weight: .semibold))
+                .font(.system(size: AppTheme.Icon.small + 2, weight: .semibold))
                 .foregroundStyle(tint)
-                .frame(width: 44, height: 44)
-                .background(AppTheme.surface, in: Circle())
+                .frame(
+                    minWidth: AppTheme.Spacing.minimumHitTarget,
+                    minHeight: AppTheme.Spacing.minimumHitTarget
+                )
+                .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.glass)
+        .buttonBorderShape(.circle)
+    }
+
+    private var badge: some View {
+        VStack(spacing: 0) {
+            Text(viewModel.currentPost?.sourceName ?? "Booru")
+                .font(AppTheme.Typography.secondary.weight(.semibold))
+                .foregroundStyle(AppTheme.textPrimary)
+                .lineLimit(1)
+            Text("\(viewModel.currentIndex + 1) / \(viewModel.posts.count)")
+                .font(AppTheme.Typography.caption)
+                .foregroundStyle(AppTheme.textSecondary)
+                .monospacedDigit()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .glassEffect(.regular, in: Capsule())
+    }
+
+    private var mangaModeButton: some View {
+        glassCircleButton(
+            system: viewModel.isMangaMode ? "book.fill" : "book",
+            tint: viewModel.isMangaMode ? AppTheme.primary : AppTheme.textPrimary
+        ) {
+            viewModel.isMangaMode.toggle()
+        }
+        .accessibilityLabel(viewModel.isMangaMode ? "Exit manga mode" : "Manga mode")
+        .accessibilityIdentifier("viewer.mangaModeButton")
+    }
+
+    // MARK: HentaiHaven episode selector
+
+    /// Native menu for HentaiHaven series episodes, hosted in the top glass bar
+    /// outside the video player surface and transport controls.
+    private func episodeMenu(for post: BooruPost) -> some View {
+        let episodes = viewModel.episodes(for: post)
+        let selected = viewModel.selectedEpisode(for: post)
+        let labelText = selected.map { "Ep \($0.number)" } ?? "Episodes"
+
+        return Menu {
+            ForEach(episodes) { episode in
+                Button {
+                    viewModel.selectEpisode(episode, for: post)
+                } label: {
+                    if episode.id == selected?.id {
+                        Label("Episode \(episode.number)", systemImage: "checkmark")
+                    } else {
+                        Text("Episode \(episode.number)")
+                    }
+                }
+                .accessibilityIdentifier("viewer.episodeOption.\(episode.number)")
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "list.number")
+                    .font(.system(size: 13, weight: .semibold))
+                Text(labelText)
+                    .font(AppTheme.Typography.caption)
+            }
+            .foregroundStyle(AppTheme.textPrimary)
+            .padding(.horizontal, 10)
+            .frame(
+                minWidth: AppTheme.Spacing.minimumHitTarget,
+                minHeight: AppTheme.Spacing.minimumHitTarget
+            )
+            .contentShape(Capsule())
+        }
+        .glassEffect(.regular.interactive(), in: Capsule())
+        .accessibilityLabel("Episodes")
+        .accessibilityIdentifier("viewer.episodeButton")
+    }
+
+    private var toastOverlay: some View {
+        VStack(spacing: 0) {
+            if let message = viewModel.toastMessage {
+                Text(message)
+                    .font(AppTheme.Typography.body.weight(.semibold))
+                    .foregroundStyle(AppTheme.textPrimary)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .glassEffect(.regular.tint(AppTheme.primary), in: Capsule())
+                    .padding(.top, topChromeHeight + 8)
+            }
+            Spacer(minLength: 0)
+        }
+        .allowsHitTesting(false)
     }
 
     private func toggleControls() {

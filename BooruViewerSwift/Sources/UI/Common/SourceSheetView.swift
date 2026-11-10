@@ -7,6 +7,10 @@ import SwiftUI
 /// The sheet stays on the current screen: choosing a row calls `onSelect` and closes,
 /// re-choosing the active source only closes (SourceSheet.tsx:54-67). Hidden sources
 /// are never listed (SourceCatalog.tsx:46; `sexcom` is `hidden: true` at sources.ts:91).
+///
+/// Presentation is stock iOS 26: a `NavigationStack` around a `List` of `Section`s, a
+/// native `.searchable` filter, and a toolbar Done button. No custom background, drag
+/// handle, or radio artwork is layered over the system sheet chrome / Liquid Glass.
 struct SourceSheetView: View {
     /// One catalog row: brand mark, display name, and the kind/host line.
     struct Entry: Identifiable, Hashable, Sendable {
@@ -46,6 +50,7 @@ struct SourceSheetView: View {
     private let onSelect: (SourceID) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @State private var searchText = ""
 
     init(selectedSource: SourceID, onSelect: @escaping (SourceID) -> Void) {
         self.selectedSource = selectedSource
@@ -53,28 +58,35 @@ struct SourceSheetView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            Capsule()
-                .fill(Color.white.opacity(0.2))
-                .frame(width: 40, height: 4)
-                .padding(.vertical, 8)
-
-            header
-
-            ScrollView {
-                VStack(spacing: AppTheme.Spacing.item) {
-                    countRow
-                    ForEach(Self.visibleCatalog) { entry in
-                        row(for: entry)
+        NavigationStack {
+            List {
+                ForEach(sections, id: \.kind) { section in
+                    Section {
+                        ForEach(section.entries) { entry in
+                            row(for: entry)
+                        }
+                    } header: {
+                        Text(section.kind)
                     }
                 }
-                .padding(.horizontal, AppTheme.Spacing.screenHorizontal)
-                .padding(.top, 4)
-                .padding(.bottom, 32)
             }
-            .scrollIndicators(.visible)
+            .listStyle(.insetGrouped)
+            .navigationTitle("Choose Source")
+            .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $searchText, prompt: "Search sources")
+            .overlay {
+                if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   sections.isEmpty {
+                    ContentUnavailableView.search(text: searchText)
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .tint(AppTheme.primary)
         }
-        .background(AppTheme.background)
     }
 
     // MARK: Catalog
@@ -114,51 +126,42 @@ struct SourceSheetView: View {
         )
     }
 
+    // MARK: Sectioning
+
+    /// One native list section: a catalog kind and the visible rows that belong to it.
+    private struct KindSection {
+        let kind: String
+        let entries: [Entry]
+    }
+
+    /// `visibleCatalog` grouped by `kind`, keeping catalog order inside each group and
+    /// emitting the groups in the order their first row appears. Search narrows the rows.
+    private var sections: [KindSection] {
+        var order: [String] = []
+        var grouped: [String: [Entry]] = [:]
+
+        for entry in Self.visibleCatalog where matches(entry) {
+            if grouped[entry.kind] == nil {
+                order.append(entry.kind)
+            }
+            grouped[entry.kind, default: []].append(entry)
+        }
+
+        return order.map { KindSection(kind: $0, entries: grouped[$0] ?? []) }
+    }
+
+    private func matches(_ entry: Entry) -> Bool {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return true }
+        let haystack = "\(entry.name) \(entry.kind) \(entry.host)"
+        return haystack.localizedCaseInsensitiveContains(query)
+    }
+
     // MARK: Rows
-
-    private var countRow: some View {
-        HStack {
-            Text("\(Self.visibleCatalog.count) \(Self.visibleCatalog.count == 1 ? "SOURCE" : "SOURCES")")
-                .font(AppTheme.Typography.caption)
-                .kerning(1.3)
-                .foregroundStyle(AppTheme.textSecondary)
-            Spacer(minLength: AppTheme.Spacing.item)
-            Text("Tap to switch")
-                .font(AppTheme.Typography.secondary)
-                .foregroundStyle(AppTheme.textMuted)
-        }
-        .padding(.top, 4)
-        .padding(.bottom, 2)
-    }
-
-    private var header: some View {
-        HStack(spacing: AppTheme.Spacing.item) {
-            circleButton(systemName: "xmark") {
-                dismiss()
-            }
-            .accessibilityLabel("Close source picker")
-
-            VStack(spacing: 1) {
-                // Sheet title sits between the compact body and screen-title tokens: it
-                // still outranks the 13 pt row names without the old 17 pt bulk.
-                Text("Choose source")
-                    .font(.system(.subheadline, weight: .heavy))
-                    .foregroundStyle(AppTheme.textPrimary)
-                Text("Stay here, switch instantly")
-                    .font(AppTheme.Typography.secondary)
-                    .foregroundStyle(AppTheme.textMuted)
-            }
-            .frame(maxWidth: .infinity)
-
-            // Matches the leading button so the copy stays centered (SourceSheet.tsx:110-112).
-            Color.clear.frame(width: AppTheme.Spacing.minimumHitTarget, height: AppTheme.Spacing.minimumHitTarget)
-        }
-        .padding(.horizontal, AppTheme.Spacing.screenHorizontal)
-        .padding(.bottom, 10)
-    }
 
     private func row(for entry: Entry) -> some View {
         let selected = entry.id == selectedSource
+
         return Button {
             if !selected {
                 onSelect(entry.id)
@@ -168,95 +171,47 @@ struct SourceSheetView: View {
             HStack(spacing: AppTheme.Spacing.item) {
                 mark(for: entry)
 
-                VStack(alignment: .leading, spacing: 1) {
-                    HStack(spacing: 6) {
-                        Text(entry.name)
-                            .font(AppTheme.Typography.body)
-                            .fontWeight(.semibold)
-                            .foregroundStyle(AppTheme.textPrimary)
-                        if selected {
-                            Text("ACTIVE")
-                                .font(.system(.caption2, weight: .heavy))
-                                .kerning(0.7)
-                                .foregroundStyle(AppTheme.primaryLight)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(
-                                    AppTheme.primary.opacity(0.12),
-                                    in: RoundedRectangle(cornerRadius: 4)
-                                )
-                        }
-                    }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(entry.name)
+                        .font(AppTheme.Typography.body)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(AppTheme.textPrimary)
                     Text("\(entry.kind) · \(entry.host)")
-                        .font(AppTheme.Typography.caption)
+                        .font(AppTheme.Typography.secondary)
                         .foregroundStyle(AppTheme.textSecondary)
                         .lineLimit(1)
                 }
 
                 Spacer(minLength: AppTheme.Spacing.item)
 
-                radio(selected: selected)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .frame(minHeight: AppTheme.Spacing.minimumHitTarget)
-            .background(
-                selected ? AppTheme.selectedSurface : AppTheme.card,
-                in: RoundedRectangle(cornerRadius: 12)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(selected ? AppTheme.primary.opacity(0.47) : AppTheme.border, lineWidth: 1)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 12))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(selected ? "\(entry.name), active source" : "Use \(entry.name)")
-    }
-
-    private func mark(for entry: Entry) -> some View {
-        RoundedRectangle(cornerRadius: 9)
-            .fill(AppTheme.color(entry.colorHex, opacity: 0.08))
-            .frame(width: 28, height: 28)
-            .overlay {
-                Text(entry.initials)
-                    .font(.system(size: 11, weight: .heavy))
-                    .kerning(-0.5)
-                    .foregroundStyle(AppTheme.color(entry.colorHex))
-            }
-    }
-
-    private func radio(selected: Bool) -> some View {
-        Circle()
-            .fill(selected ? AppTheme.primary : Color.clear)
-            .frame(width: 15, height: 15)
-            .overlay {
-                Circle()
-                    .stroke(selected ? AppTheme.primary : AppTheme.color(0x3A3F52), lineWidth: 1.5)
-            }
-            .overlay {
+                // Native single-selection feedback: a tinted checkmark on the active row,
+                // not a hand-drawn radio.
                 if selected {
                     Image(systemName: "checkmark")
-                        .font(.system(size: 8, weight: .heavy))
-                        .foregroundStyle(Color.white)
+                        .font(AppTheme.Typography.sectionTitle)
+                        .foregroundStyle(AppTheme.primary)
                 }
             }
+            .frame(minHeight: AppTheme.Spacing.minimumHitTarget)
+            .contentShape(Rectangle())
+        }
+        // Plain keeps the row's own label colours (an automatic List button style would
+        // tint them with the accent) while the row content keeps the full-width hit area.
+        .buttonStyle(.plain)
+        .accessibilityLabel(selected ? "\(entry.name), active source" : "Use \(entry.name)")
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 
-    private func circleButton(systemName: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: AppTheme.Icon.small, weight: .semibold))
-                .foregroundStyle(Color.white)
-                .frame(width: 36, height: 36)
-                .background(AppTheme.surface, in: Circle())
-                .overlay {
-                    Circle().stroke(AppTheme.border, lineWidth: 1)
-                }
-                // Keep the 44 pt tap lane while the painted button shrinks.
-                .frame(minWidth: AppTheme.Spacing.minimumHitTarget, minHeight: AppTheme.Spacing.minimumHitTarget)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
+    /// Brand badge: the catalog initials over a wash of the brand colour. Sized by the
+    /// semantic caption font plus padding, so Dynamic Type grows it instead of clipping.
+    private func mark(for entry: Entry) -> some View {
+        Text(entry.initials)
+            .font(AppTheme.Typography.caption)
+            .fontWeight(.heavy)
+            .foregroundStyle(AppTheme.color(entry.colorHex))
+            .padding(.horizontal, 7)
+            .frame(minWidth: AppTheme.Spacing.minimumHitTarget - 14, minHeight: AppTheme.Spacing.minimumHitTarget - 14)
+            .background(AppTheme.color(entry.colorHex, opacity: 0.16), in: RoundedRectangle(cornerRadius: 9))
+            .accessibilityHidden(true)
     }
 }

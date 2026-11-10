@@ -49,8 +49,8 @@ struct SearchFilterSheetView: View {
                 automationSection
                 resetSection
             }
-            .scrollContentBackground(.hidden)
-            .background(AppTheme.background)
+            // Stock grouped form background and system sheet chrome (Liquid Glass), with no
+            // custom surface painted behind the list.
             .navigationTitle("Filter")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

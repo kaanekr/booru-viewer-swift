@@ -1,7 +1,9 @@
 # Booru Viewer (SwiftUI)
 
 A native iOS client for browsing imageboard-style and video sites through their public APIs
-and public web pages. SwiftUI, iOS 17+, iPhone only, no third-party Swift packages.
+and public web pages. Native iOS 26 SwiftUI (Liquid Glass navigation, toolbars, `.searchable`,
+native sheets/forms) and native Apple `AVPlayerViewController` video playback, iOS 26.0+,
+iPhone only, no third-party Swift packages.
 
 > **18+ only.** This app is a reader for adult content sites. It does not contain, host, or
 > bundle any media, and it ships with no credentials.
@@ -10,13 +12,17 @@ and public web pages. SwiftUI, iOS 17+, iPhone only, no third-party Swift packag
 
 - One application target in `BooruViewerSwift/Sources/`, split into contracts, network,
   source adapters (JSON APIs and HTML scrapers), storage, security, media, UI, and screens.
+- Native iOS 26 interface using system `TabView`, `NavigationStack`, Liquid Glass toolbar/chip
+  controls, grouped `Form`/`List` settings and info sheets, and `AVPlayerViewController` (`AVKit`)
+  in the full-screen viewer.
 - Unit tests in `BooruViewerSwift/Tests/`, UI tests in `BooruViewerSwift/UITests/`.
 - Demo mode (`-demoMode` launch argument) uses neutral placeholder imagery so screens can be
   exercised without contacting any network source.
 
 ## Build
 
-Requires macOS with Xcode and [XcodeGen](https://github.com/yonaskolb/XcodeGen).
+Requires macOS with **Xcode 26** (or newer) and matching **iOS 26 SDK**, targeting **iOS 26.0+**
+(iPhone only), plus [XcodeGen](https://github.com/yonaskolb/XcodeGen).
 
 ```sh
 cd BooruViewerSwift
@@ -36,12 +42,28 @@ xcodebuild test -project BooruViewer.xcodeproj -scheme BooruViewer \
 ### Unsigned IPA
 
 `.github/workflows/build-swift-ios.yml` builds an unsigned device `.ipa` on a stock
-`macos-26` GitHub runner, and separately runs the unit tests, the UI tests, and a screenshot
-smoke run. The uploaded IPA has no signature, no provisioning profile, and no entitlements:
-it must be re-signed with your own certificate and profile before it can be installed on a
+`macos-26` GitHub runner (selecting Xcode 26.6 when available), and separately runs the unit
+tests, the UI tests, and a screenshot smoke run. To package an unsigned device `.ipa` locally,
+generate the project in `BooruViewerSwift/`, build `Release` for `generic/platform=iOS` with
+signing disabled (`CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""`),
+copy the `.app` into `Payload/`, and zip it as `.ipa`.
+
+The resulting `.ipa` has no signature, no provisioning profile, and no entitlements: it must be
+re-signed with your own certificate and provisioning profile before it can be installed on a
 device. Nothing here produces an App Store submission or a notarized build.
 
-## Limitations, honestly
+## Status & limitations, honestly
+
+- **Current branch status:** Changes on the local `feat/ios26-native-ui` branch have **no CI run
+  yet**. A fresh Xcode 26 native UI build, simulator/device verification, and a current unsigned
+  `.ipa` artifact are **pending**.
+- **Test status:** Prior reported test counts (such as earlier 239 or 232 counts) belong to older
+  pre-iOS-26 builds and are **not proof** of the new iOS 26 native UI or `AVPlayerViewController`
+  playback integration.
+- **Pending UI test fixtures:** Special UI test suites for delayed multi-page reader extent
+  (`MangaScrollUITests`, `-mangaFixture`) and native `AVPlayerViewController` scrubber vs. pager
+  arbitration (`NativePlayerInteractionUITests`, `-videoFixture`) require deterministic offline
+  fixtures not yet wired into the app target and intentionally `XCTSkip` until those fixtures land.
 
 This is a client for third-party services, so its reliability is bounded by theirs:
 

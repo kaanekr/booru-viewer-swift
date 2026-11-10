@@ -101,25 +101,24 @@ struct RootTabView: View {
 
     var body: some View {
         ZStack {
-            // Plain SwiftUI `TabView`: styling is only `.tint` plus the root `.background`
-            // below, which sits behind the translucent system bar and keeps the bottom edge
-            // black-free.
+            // Genuine SwiftUI `TabView` using native `SwiftUI.Tab` items so iOS 26 owns the
+            // floating Liquid Glass tab bar while keeping all four tabs directly reachable.
             TabView(selection: $selectedTab) {
-                exploreTab
-                    .tabItem { Label(Tab.explore.title, systemImage: Tab.explore.symbol) }
-                    .tag(Tab.explore)
+                SwiftUI.Tab(Tab.explore.title, systemImage: Tab.explore.symbol, value: Tab.explore) {
+                    exploreTab
+                }
 
-                searchTab
-                    .tabItem { Label(Tab.search.title, systemImage: Tab.search.symbol) }
-                    .tag(Tab.search)
+                SwiftUI.Tab(Tab.search.title, systemImage: Tab.search.symbol, value: Tab.search) {
+                    searchTab
+                }
 
-                favoritesTab
-                    .tabItem { Label(Tab.favorites.title, systemImage: Tab.favorites.symbol) }
-                    .tag(Tab.favorites)
+                SwiftUI.Tab(Tab.favorites.title, systemImage: Tab.favorites.symbol, value: Tab.favorites) {
+                    favoritesTab
+                }
 
-                settingsTab
-                    .tabItem { Label(Tab.settings.title, systemImage: Tab.settings.symbol) }
-                    .tag(Tab.settings)
+                SwiftUI.Tab(Tab.settings.title, systemImage: Tab.settings.symbol, value: Tab.settings) {
+                    settingsTab
+                }
             }
             .tint(AppTheme.primary)
 
@@ -221,7 +220,6 @@ struct RootTabView: View {
                 },
                 onOpenPost: { posts, index in openViewer(posts, index) }
             )
-            .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: TagSearchTarget.self) { target in
                 detailScreen(for: target)
             }
@@ -250,7 +248,6 @@ struct RootTabView: View {
                 },
                 onOpenPost: { posts, index in openViewer(posts, index) }
             )
-            .toolbar(.hidden, for: .navigationBar)
             .id(searchToken)
         }
         .background(AppTheme.background.ignoresSafeArea())

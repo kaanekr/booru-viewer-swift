@@ -1,49 +1,65 @@
 import SwiftUI
+import UIKit
 
-/// Dark theme tokens for the native UI.
+/// Theme tokens for the native iOS 26 UI.
 ///
-/// Values are the exact RN palette entries from `Colors.dark` (src/theme/colors.ts:29-47)
-/// and `TagColors` (colors.ts:1-27). There is no light palette: the app is dark-only,
-/// like the RN build.
+/// Surfaces, text, and lines are the *system semantic* colours (`.systemBackground`,
+/// `.label`, `.separator`, …) instead of hard-coded hexes, so content follows the
+/// platform's appearance and accessibility settings. The app still runs dark-only
+/// (`BooruViewerApp` pins `.preferredColorScheme(.dark)`), so these resolve to their dark
+/// variants — the same near-black look the previous fixed palette described.
+///
+/// The brand accents (`primary`, `accent`, `goldAccent`) and the `TagColors` palette keep
+/// their exact identity values: the app's accent and the per-category tag colours must stay
+/// recognisable across screens.
+///
+/// This type is data only. It never installs `UINavigationBar` / `UITabBar` appearance
+/// proxies, never masks chrome, and never forces a font, size category, or scale: native
+/// navigation bars, tab bars, toolbars, sheets, and lists draw their own Liquid Glass.
 enum AppTheme {
     // MARK: Surfaces
 
-    /// RN `Colors.dark.background`.
-    static let background = color(0x0B0D13)
-    /// RN `Colors.dark.card`; the post-card and source-row fill.
-    static let card = color(0x161922)
-    /// RN `Colors.dark.surface`; pills and circular buttons.
-    static let surface = color(0x1E2230)
-    /// RN `SourceCatalog.tsx:85` selected row fill.
-    static let selectedSurface = color(0x181B30)
-    /// RN `FeedScreen.tsx:633` inactive quick-filter chip fill.
-    static let chip = color(0x181A22)
-    /// RN `FeedScreen.tsx:635` inactive quick-filter chip border.
-    static let chipBorder = color(0x292D3B)
+    /// Page background behind scrolling content.
+    static let background = Color(uiColor: .systemBackground)
+    /// Post-card / content-card fill.
+    static let card = Color(uiColor: .secondarySystemBackground)
+    /// Raised control fill: pills, circular buttons, inline fields.
+    static let surface = Color(uiColor: .tertiarySystemBackground)
+    /// Fill for the picked row of a native picker/list, tinted with the brand accent.
+    static let selectedSurface = primary.opacity(0.18)
+    /// Inactive chip fill, one step quieter than `surface`.
+    static let chip = Color(uiColor: .quaternarySystemFill)
+    /// Inactive chip outline.
+    static let chipBorder = Color(uiColor: .separator)
+
+    /// Material for *content* surfaces that should read as system-standard (cards over busy
+    /// media, floating panels). Never apply it to navigation/tab/toolbar chrome — the system
+    /// owns that glass.
+    static let contentMaterial: Material = .regularMaterial
 
     // MARK: Text
 
-    /// RN `Colors.dark.text`.
-    static let textPrimary = color(0xFFFFFF)
-    /// RN `Colors.dark.textSecondary`.
-    static let textSecondary = color(0x8E92A4)
-    /// RN `Colors.dark.textMuted`.
-    static let textMuted = color(0x5C6073)
+    /// Primary copy: titles, row names, values.
+    static let textPrimary = Color(uiColor: .label)
+    /// Supporting copy: subtitles, source hosts, hints.
+    static let textSecondary = Color(uiColor: .secondaryLabel)
+    /// Lowest-emphasis copy: metadata, placeholder hints, disabled labels.
+    static let textMuted = Color(uiColor: .tertiaryLabel)
 
     // MARK: Accents
 
-    /// RN `Colors.dark.primary`.
+    /// RN `Colors.dark.primary`; the brand accent. Use as `.tint` for interactive chrome.
     static let primary = color(0x6366F1)
-    /// RN `Colors.dark.primaryLight`.
+    /// Lighter brand accent for glyphs and inline emphasis.
     static let primaryLight = color(0x818CF8)
-    /// RN `Colors.dark.accent`.
+    /// RN `Colors.dark.accent`; secondary brand accent.
     static let accent = color(0xEC4899)
-    /// RN `Colors.dark.warning`.
-    static let warning = color(0xF59E0B)
-    /// RN `Colors.dark.danger`.
-    static let danger = color(0xEF4444)
-    /// RN `Colors.dark.safe`.
-    static let success = color(0x10B981)
+    /// Caution state.
+    static let warning = Color(uiColor: .systemOrange)
+    /// Destructive state.
+    static let danger = Color(uiColor: .systemRed)
+    /// Success/healthy state.
+    static let success = Color(uiColor: .systemGreen)
     /// RN `FeedScreen.tsx:39` selected quick-filter accent.
     static let goldAccent = color(0xF5A623)
     /// RN `FeedScreen.tsx:647` text on the selected quick-filter chip.
@@ -51,14 +67,15 @@ enum AppTheme {
 
     // MARK: Lines
 
-    /// RN `Colors.dark.cardBorder` (rgba(255, 255, 255, 0.08)).
-    static let border = Color.white.opacity(0.08)
-    /// RN `Colors.dark.divider` (rgba(255, 255, 255, 0.06)).
-    static let divider = Color.white.opacity(0.06)
+    /// Hairline stroke around content cards.
+    static let border = Color(uiColor: .separator)
+    /// Hairline divider between rows.
+    static let divider = Color(uiColor: .separator)
 
     // MARK: Tag palette
 
-    /// RN `TagColors[category].text` (colors.ts:1-27).
+    /// RN `TagColors[category].text` (colors.ts:1-27). Exact values: the tag colour *is*
+    /// the category signal, so these stay fixed brand data rather than system colours.
     static func tagColor(for category: TagCategory) -> Color {
         switch category {
         case .artist: return color(0xFF6B6B)
@@ -69,14 +86,15 @@ enum AppTheme {
         }
     }
 
-    /// RN `TagColors[category].bg` (alpha 0.15 over the card).
+    /// RN `TagColors[category].bg` (a low-alpha wash of the tag colour). Lifted from the RN
+    /// 0.15 so the wash still reads on the darker system background.
     static func tagBackground(for category: TagCategory) -> Color {
-        tagColor(for: category).opacity(0.15)
+        tagColor(for: category).opacity(0.18)
     }
 
-    /// RN `TagColors[category].border` (alpha 0.3 over the card).
+    /// RN `TagColors[category].border` (a mid-alpha stroke of the tag colour).
     static func tagBorder(for category: TagCategory) -> Color {
-        tagColor(for: category).opacity(0.3)
+        tagColor(for: category).opacity(0.35)
     }
 
     // MARK: Rating palette
@@ -164,7 +182,8 @@ enum AppTheme {
 
     // MARK: Hex helper
 
-    /// 0xRRGGBB literal, the same notation the RN theme uses.
+    /// 0xRRGGBB literal, the same notation the RN theme uses. Only for fixed brand data
+    /// (accents, brand marks, tag/rating palette) — surfaces and text come from the system.
     static func color(_ hex: UInt32, opacity: Double = 1) -> Color {
         Color(
             .sRGB,
