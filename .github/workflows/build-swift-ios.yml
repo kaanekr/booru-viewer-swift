@@ -1,0 +1,512 @@
+name: Build Swift iOS IPA (Unsigned)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "main"
+    paths:
+      - "BooruViewerSwift/**"
+      - ".github/workflows/build-swift-ios.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: swift-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - name: ⬇️ Checkout repository
+        uses: actions/checkout@v5
+
+      - name: 🍎 Select Xcode (26.6 preferred, newest fallback)
+        run: |
+          set -e
+          set -o pipefail
+          ls /Applications | grep -i xcode || true
+
+          if [ -d /Applications/Xcode_26.6.app ]; then
+            XCODE_APP=/Applications/Xcode_26.6.app
+          else
+            echo "Xcode_26.6.app not found; falling back to newest available Xcode_*.app"
+            XCODE_APP=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -n 1 || true)
+          fi
+
+          if [ -z "$XCODE_APP" ] || [ ! -d "$XCODE_APP" ]; then
+            echo "ERROR: No Xcode installation found in /Applications"
+            ls -la /Applications
+            exit 1
+          fi
+
+          echo "Using Xcode at: $XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          xcodebuild -version
+          swift --version
+
+      - name: 📦 Install XcodeGen
+        run: |
+          command -v xcodegen || brew install xcodegen
+          xcodegen --version
+
+      - name: ⚙️ Generate Xcode project
+        run: |
+          set -e
+          cd BooruViewerSwift
+          xcodegen generate
+          ls -la
+          echo "Generated project:"
+          ls -d *.xcodeproj
+
+      - name: 🔨 Build unsigned Release for device
+        run: |
+          set -o pipefail
+          cd BooruViewerSwift
+          xcodebuild \
+            -project BooruViewer.xcodeproj \
+            -scheme BooruViewer \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            build | tee build.log
+
+      - name: 🧾 Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-ios-build-log
+          path: BooruViewerSwift/build.log
+          if-no-files-found: warn
+
+      - name: 📦 Package .ipa file
+        run: |
+          set -e
+          set -o pipefail
+          cd BooruViewerSwift
+          echo "=== Searching for .app bundle ==="
+          APP_PATH=$(find build -name "*.app" -type d | grep -v ".xctest" | head -n 1 || true)
+          echo "Found app at: ${APP_PATH:-<none>}"
+
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: No .app bundle found under BooruViewerSwift/build!"
+            find build -maxdepth 4 -type d
+            exit 1
+          fi
+
+          mkdir -p Payload
+          cp -r "$APP_PATH" Payload/
+          zip -r BooruViewer-Swift.ipa Payload
+          ls -lh BooruViewer-Swift.ipa
+
+      - name: 🚀 Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BooruViewer-Swift-IPA
+          path: BooruViewerSwift/BooruViewer-Swift.ipa
+          retention-days: 14
+
+  test:
+    runs-on: macos-26
+    needs: build
+    timeout-minutes: 30
+    steps:
+      - name: ⬇️ Checkout repository
+        uses: actions/checkout@v5
+
+      - name: 🍎 Select Xcode (26.6 preferred, newest fallback)
+        run: |
+          set -e
+          set -o pipefail
+          ls /Applications | grep -i xcode || true
+
+          if [ -d /Applications/Xcode_26.6.app ]; then
+            XCODE_APP=/Applications/Xcode_26.6.app
+          else
+            echo "Xcode_26.6.app not found; falling back to newest available Xcode_*.app"
+            XCODE_APP=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -n 1 || true)
+          fi
+
+          if [ -z "$XCODE_APP" ] || [ ! -d "$XCODE_APP" ]; then
+            echo "ERROR: No Xcode installation found in /Applications"
+            ls -la /Applications
+            exit 1
+          fi
+
+          echo "Using Xcode at: $XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          xcodebuild -version
+          swift --version
+
+      - name: 📦 Install XcodeGen
+        run: |
+          command -v xcodegen || brew install xcodegen
+          xcodegen --version
+
+      - name: ⚙️ Generate Xcode project
+        run: |
+          set -e
+          cd BooruViewerSwift
+          xcodegen generate
+          ls -la
+          echo "Generated project:"
+          ls -d *.xcodeproj
+
+      - name: 🧪 Run unit tests on simulator
+        run: |
+          set -e
+          set -o pipefail
+          cd BooruViewerSwift
+
+          # Select a simulator by UDID (robust when no device is pre-booted).
+          DEVICE_ID=$(xcrun simctl list devices available --json | python3 -c '
+          import json,sys
+          d=json.load(sys.stdin)["devices"]
+          cands=[]
+          for rt,devs in d.items():
+              if "iOS" not in rt: continue
+              for x in devs:
+                  if x.get("isAvailable") and "iPhone" in x["name"]:
+                      cands.append((rt,x["name"],x["udid"]))
+          if not cands:
+              sys.exit(1)
+          cands.sort(reverse=True)
+          print(cands[0][2])
+          ') || {
+            echo "ERROR: Failed to select an available iPhone simulator from simctl JSON."
+            echo "Available devices:"
+            xcrun simctl list devices available
+            exit 1
+          }
+
+          if [ -z "$DEVICE_ID" ]; then
+            echo "ERROR: Simulator UDID selection returned an empty value."
+            echo "Available devices:"
+            xcrun simctl list devices available
+            exit 1
+          fi
+
+          echo "Using simulator UDID: $DEVICE_ID"
+
+          set +e
+          xcodebuild test \
+            -project BooruViewer.xcodeproj \
+            -scheme BooruViewer \
+            -destination "id=$DEVICE_ID" \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" | tee test.log
+          XCODEBUILD_STATUS=$?
+          set -e
+
+          echo "xcodebuild test exit code: $XCODEBUILD_STATUS"
+          echo "=== Test summary ==="
+          grep -E "Test Suite 'All tests'|Executed [0-9]+ test" test.log || true
+          echo "=== Failing tests ==="
+          grep -E "Test Case '.*' failed" test.log || true
+
+          exit $XCODEBUILD_STATUS
+
+      - name: 🧾 Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-ios-test-logs
+          path: |
+            BooruViewerSwift/build/Logs/Test
+            BooruViewerSwift/test.log
+          if-no-files-found: warn
+
+  # Real-gesture UI tests (`BooruViewerUITests`): launches the app in `-demoMode`, swipes the
+  # Explore grid, taps a card to open the viewer, and switches every tab in the simulator, so
+  # a "scroll and tap stopped working" regression fails the run.
+  #
+  # `continue-on-error: true` is for the FIRST run only — drop it once the target is green in
+  # CI so a broken gesture blocks the IPA again.
+  ui-tests:
+    runs-on: macos-26
+    needs: build
+    continue-on-error: true
+    timeout-minutes: 45
+    steps:
+      - name: ⬇️ Checkout repository
+        uses: actions/checkout@v5
+
+      - name: 🍎 Select Xcode (26.6 preferred, newest fallback)
+        run: |
+          set -e
+          set -o pipefail
+          ls /Applications | grep -i xcode || true
+
+          if [ -d /Applications/Xcode_26.6.app ]; then
+            XCODE_APP=/Applications/Xcode_26.6.app
+          else
+            echo "Xcode_26.6.app not found; falling back to newest available Xcode_*.app"
+            XCODE_APP=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -n 1 || true)
+          fi
+
+          if [ -z "$XCODE_APP" ] || [ ! -d "$XCODE_APP" ]; then
+            echo "ERROR: No Xcode installation found in /Applications"
+            ls -la /Applications
+            exit 1
+          fi
+
+          echo "Using Xcode at: $XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          xcodebuild -version
+          swift --version
+
+      - name: 📦 Install XcodeGen
+        run: |
+          command -v xcodegen || brew install xcodegen
+          xcodegen --version
+
+      - name: ⚙️ Generate Xcode project
+        run: |
+          set -e
+          cd BooruViewerSwift
+          xcodegen generate
+          ls -la
+          echo "Generated project:"
+          ls -d *.xcodeproj
+
+      - name: 🧪 Run UI tests on simulator
+        run: |
+          set -e
+          set -o pipefail
+          cd BooruViewerSwift
+
+          # Select a simulator by UDID (robust when no device is pre-booted).
+          DEVICE_ID=$(xcrun simctl list devices available --json | python3 -c '
+          import json,sys
+          d=json.load(sys.stdin)["devices"]
+          cands=[]
+          for rt,devs in d.items():
+              if "iOS" not in rt: continue
+              for x in devs:
+                  if x.get("isAvailable") and "iPhone" in x["name"]:
+                      cands.append((rt,x["name"],x["udid"]))
+          if not cands:
+              sys.exit(1)
+          cands.sort(reverse=True)
+          print(cands[0][2])
+          ') || {
+            echo "ERROR: Failed to select an available iPhone simulator from simctl JSON."
+            echo "Available devices:"
+            xcrun simctl list devices available
+            exit 1
+          }
+
+          if [ -z "$DEVICE_ID" ]; then
+            echo "ERROR: Simulator UDID selection returned an empty value."
+            echo "Available devices:"
+            xcrun simctl list devices available
+            exit 1
+          fi
+
+          echo "Using simulator UDID: $DEVICE_ID"
+
+          xcrun simctl boot "$DEVICE_ID" || true
+          xcrun simctl bootstatus "$DEVICE_ID" -b || true
+
+          # `set -o pipefail` makes the pipeline fail when xcodebuild fails, so the job result
+          # reflects a real gesture regression instead of `tee`'s exit code.
+          xcodebuild test \
+            -project BooruViewer.xcodeproj \
+            -scheme BooruViewer \
+            -destination "id=$DEVICE_ID" \
+            -only-testing:BooruViewerUITests \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" | tee uitest.log
+
+          echo "=== UI test summary ==="
+          grep -E "Test Suite 'All tests'|Executed [0-9]+ test" uitest.log || true
+          echo "=== Failing tests ==="
+          grep -E "Test Case '.*' failed" uitest.log || true
+
+      - name: 🧾 Upload UI test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-ios-uitest-logs
+          path: |
+            BooruViewerSwift/uitest.log
+            BooruViewerSwift/build/Logs/Test
+            BooruViewerSwift/build/**/*.xcresult
+          if-no-files-found: warn
+
+  # Visual smoke run: boots the app in the simulator with demo launch arguments and captures
+  # screenshots + a short video so the UI can be inspected without a Mac.
+  # continue-on-error keeps this purely visual job from blocking the IPA.
+  ui-smoke:
+    runs-on: macos-26
+    needs: build
+    continue-on-error: true
+    timeout-minutes: 40
+    steps:
+      - name: ⬇️ Checkout repository
+        uses: actions/checkout@v5
+
+      - name: 🍎 Select Xcode (26.6 preferred, newest fallback)
+        run: |
+          set -e
+          set -o pipefail
+          ls /Applications | grep -i xcode || true
+
+          if [ -d /Applications/Xcode_26.6.app ]; then
+            XCODE_APP=/Applications/Xcode_26.6.app
+          else
+            echo "Xcode_26.6.app not found; falling back to newest available Xcode_*.app"
+            XCODE_APP=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -n 1 || true)
+          fi
+
+          if [ -z "$XCODE_APP" ] || [ ! -d "$XCODE_APP" ]; then
+            echo "ERROR: No Xcode installation found in /Applications"
+            ls -la /Applications
+            exit 1
+          fi
+
+          echo "Using Xcode at: $XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          xcodebuild -version
+          swift --version
+
+      - name: 📦 Install XcodeGen
+        run: |
+          command -v xcodegen || brew install xcodegen
+          xcodegen --version
+
+      - name: ⚙️ Generate Xcode project
+        run: |
+          set -e
+          cd BooruViewerSwift
+          xcodegen generate
+          ls -la
+          echo "Generated project:"
+          ls -d *.xcodeproj
+
+      - name: 📱 Select and boot a simulator
+        run: |
+          set -e
+          set -o pipefail
+
+          BUNDLE_ID=com.booru.viewer.swift
+          echo "Bundle id: $BUNDLE_ID"
+          echo "BUNDLE_ID=$BUNDLE_ID" >> "$GITHUB_ENV"
+
+          # Select a simulator by UDID (robust when no device is pre-booted).
+          DEVICE_ID=$(xcrun simctl list devices available --json | python3 -c '
+          import json,sys
+          d=json.load(sys.stdin)["devices"]
+          cands=[]
+          for rt,devs in d.items():
+              if "iOS" not in rt: continue
+              for x in devs:
+                  if x.get("isAvailable") and "iPhone" in x["name"]:
+                      cands.append((rt,x["name"],x["udid"]))
+          if not cands:
+              sys.exit(1)
+          cands.sort(reverse=True)
+          print(cands[0][2])
+          ') || {
+            echo "ERROR: Failed to select an available iPhone simulator from simctl JSON."
+            echo "Available devices:"
+            xcrun simctl list devices available
+            exit 1
+          }
+
+          if [ -z "$DEVICE_ID" ]; then
+            echo "ERROR: Simulator UDID selection returned an empty value."
+            echo "Available devices:"
+            xcrun simctl list devices available
+            exit 1
+          fi
+
+          echo "Using simulator UDID: $DEVICE_ID"
+          echo "DEVICE_ID=$DEVICE_ID" >> "$GITHUB_ENV"
+
+          xcrun simctl boot "$DEVICE_ID" || true
+          xcrun simctl bootstatus "$DEVICE_ID" -b
+
+      - name: 🔨 Build for simulator (Debug)
+        run: |
+          set -e
+          set -o pipefail
+          cd BooruViewerSwift
+          xcodebuild \
+            -project BooruViewer.xcodeproj \
+            -scheme BooruViewer \
+            -configuration Debug \
+            -destination "id=$DEVICE_ID" \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: 📲 Install app on simulator
+        run: |
+          set -e
+          cd BooruViewerSwift
+          xcrun simctl install "$DEVICE_ID" build/Build/Products/Debug-iphonesimulator/BooruViewer.app
+
+      - name: 📸 Capture tab and lock screenshots
+        run: |
+          set -e
+          SHOTS="$GITHUB_WORKSPACE/ui-shots"
+          mkdir -p "$SHOTS"
+
+          for TAB in feed search favorites settings; do
+            echo "=== Screenshot: $TAB ==="
+            xcrun simctl terminate "$DEVICE_ID" "$BUNDLE_ID" || true
+            xcrun simctl launch "$DEVICE_ID" "$BUNDLE_ID" -demoMode -initialTab "$TAB"
+            sleep 8
+            xcrun simctl io "$DEVICE_ID" screenshot "$SHOTS/$TAB.png"
+          done
+
+          echo "=== Screenshot: lock ==="
+          xcrun simctl terminate "$DEVICE_ID" "$BUNDLE_ID" || true
+          xcrun simctl launch "$DEVICE_ID" "$BUNDLE_ID" -demoMode -forceLock
+          sleep 5
+          xcrun simctl io "$DEVICE_ID" screenshot "$SHOTS/lock.png"
+
+      - name: 🎥 Record short feed video
+        run: |
+          set -e
+          SHOTS="$GITHUB_WORKSPACE/ui-shots"
+          mkdir -p "$SHOTS"
+
+          xcrun simctl terminate "$DEVICE_ID" "$BUNDLE_ID" || true
+          xcrun simctl launch "$DEVICE_ID" "$BUNDLE_ID" -demoMode -initialTab feed
+
+          xcrun simctl io "$DEVICE_ID" recordVideo --codec h264 --force "$SHOTS/feed.mp4" &
+          RECORDER_PID=$!
+          sleep 12
+          kill -INT "$RECORDER_PID" || pkill -INT -f "simctl io.*recordVideo" || true
+          wait "$RECORDER_PID" || true
+
+      - name: 📋 List captured files
+        if: always()
+        run: ls -lh "$GITHUB_WORKSPACE/ui-shots" || true
+
+      - name: 🧾 Dump app log on failure
+        if: failure()
+        run: |
+          xcrun simctl spawn "$DEVICE_ID" log show --last 2m --predicate 'process == "BooruViewer"' || true
+
+      - name: 📤 Upload UI screenshots and video
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-ios-ui-shots
+          path: ui-shots/
+          retention-days: 14
+          if-no-files-found: warn

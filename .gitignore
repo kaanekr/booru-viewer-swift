@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# CI screenshot / video output from the ui-smoke job
+ui-shots/
+
+# Xcode build products and generated project state
+build/
+DerivedData/
+*.ipa
+
+# Local build and test logs
+build.log
+test.log
+uitest.log
+
+# Personal backup and secret files (never commit these)
+*.abbj
+.env*
