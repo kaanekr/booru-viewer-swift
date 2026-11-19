@@ -547,8 +547,7 @@ struct HentaiHavenSource: BooruSource {
         }
     }
 
-    static func isPlayableVideoURL(_ url: URL?) -> Bool {
-        guard let url else { return false }
+    static func isPlayableVideoURL(_ url: URL) -> Bool {
         let raw = url.absoluteString.lowercased()
         let path = raw.split(whereSeparator: { $0 == "?" || $0 == "#" }).first.map(String.init) ?? raw
         return [".m3u8", ".mp4", ".mov", ".m4v", ".webm"].contains { path.hasSuffix($0) }
