@@ -59,7 +59,7 @@ final class SearchViewModel {
     // MARK: Internals
 
     private var allResults: [BooruPost] = []
-    private var currentPage = 1
+    private var nextPage = 1
     /// Bumped on every new search/source change; a slow response from an older one is dropped.
     private var generation = 0
     private var searchTask: Task<Void, Never>?
@@ -176,7 +176,7 @@ final class SearchViewModel {
         results = []
         blacklistedCount = 0
         errorMessage = nil
-        currentPage = 1
+        nextPage = 1
         filter = SearchFilterConfig(tags: Self.parseTags(query))
     }
 
@@ -304,7 +304,7 @@ final class SearchViewModel {
         results = []
         blacklistedCount = 0
         errorMessage = nil
-        currentPage = 1
+        nextPage = 1
         query = ""
         let autocomplete = filter.autocompleteFromServer
         filter = SearchFilterConfig(autocompleteFromServer: autocomplete)
@@ -331,7 +331,7 @@ final class SearchViewModel {
         blacklistedCount = 0
 
         let startPage = max(1, config.jumpToPage)
-        currentPage = startPage
+        nextPage = startPage
         let requestGeneration = generation
 
         searchTask = Task { [weak self] in
@@ -356,17 +356,18 @@ final class SearchViewModel {
         }
     }
 
-    /// Fetches the next page. RN advances the page only on success, so a retry re-requests it.
+    /// Fetches the next page. Advances `nextPage` only on success, so a failed page-N
+    /// retry re-requests page N instead of skipping ahead.
     func loadMore() {
         guard isSearchActive, !isLoading, !isLoadingMore, hasMore else { return }
         isLoadingMore = true
-        let nextPage = currentPage + 1
+        let pageToFetch = nextPage
         let config = filter
         let requestGeneration = generation
         searchTask = Task { [weak self] in
             await self?.fetchPage(
                 config: config,
-                page: nextPage,
+                page: pageToFetch,
                 generation: requestGeneration,
                 isFirstPage: false
             )
@@ -400,7 +401,7 @@ final class SearchViewModel {
             let pageResult = try await source.fetchPosts(query: query, page: page, context: context)
             // A stale request finishing after a source change must not overwrite the new list.
             guard requestGeneration == generation, !Task.isCancelled else { return }
-            apply(pageResult, isFirstPage: isFirstPage)
+            apply(pageResult, requestedPage: page, isFirstPage: isFirstPage)
         } catch {
             guard requestGeneration == generation else { return }
             if isFirstPage {
@@ -416,12 +417,13 @@ final class SearchViewModel {
         }
     }
 
-    private func apply(_ pageResult: PostPage, isFirstPage: Bool) {
+    private func apply(_ pageResult: PostPage, requestedPage: Int, isFirstPage: Bool) {
         if isFirstPage {
             allResults = pageResult.posts
             isLoading = false
             // An empty page ends paging (SearchScreen.tsx:381).
             hasMore = pageResult.hasMore && !pageResult.posts.isEmpty
+            nextPage = pageResult.nextPage ?? (requestedPage + 1)
             errorMessage = pageResult.posts.isEmpty ? "No results found" : nil
         } else {
             var seen = Set(allResults.map(postKey))
@@ -437,7 +439,7 @@ final class SearchViewModel {
                 return
             }
             allResults.append(contentsOf: unique)
-            currentPage = pageResult.nextPage ?? (currentPage + 1)
+            nextPage = pageResult.nextPage ?? (requestedPage + 1)
             hasMore = pageResult.hasMore
             isLoadingMore = false
         }

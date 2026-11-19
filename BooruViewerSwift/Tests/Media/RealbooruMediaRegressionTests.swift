@@ -267,6 +267,41 @@ final class RealbooruMediaRegressionTests: XCTestCase {
         let requests = await client.recordedRequests()
         let mp4Probes = requests.filter { $0.url?.absoluteString.hasSuffix(".mp4") == true }
         XCTAssertEqual(mp4Probes.map(\.httpMethod), ["HEAD"])
+        XCTAssertEqual(mp4Probes.first?.value(forHTTPHeaderField: "Referer"), "https://realbooru.com/")
+        XCTAssertEqual(mp4Probes.first?.value(forHTTPHeaderField: "User-Agent"), MediaRequestConfiguration.userAgent)
+    }
+
+    func testDetailSamplesFallbackWhenNoImagesLinkExistsWhileImagesStillWins() {
+        let samplesOnly = #"<div class="content"><img src="https://realbooru.com/samples/ab/cd/sample_abcd42.jpg" /></div>"#
+        XCTAssertEqual(
+            RealbooruSource.parseDetailFiles(html: samplesOnly).image,
+            "https://realbooru.com/samples/ab/cd/sample_abcd42.jpg"
+        )
+
+        let both = #"""
+        <div class="content">
+          <img src="https://realbooru.com/samples/ab/cd/sample_abcd42.jpg" />
+          <a href="https://realbooru.com//images/ab/cd/abcd42.png">Original</a>
+        </div>
+        """#
+        XCTAssertEqual(
+            RealbooruSource.parseDetailFiles(html: both).image,
+            "https://realbooru.com//images/ab/cd/abcd42.png"
+        )
+    }
+
+    func testRealbooruHeadProbeCarriesRefererAndUserAgentHeaders() async throws {
+        let post = try makePost(id: "79", hash: "abcd44", title: "video, mp4")
+        let client = RouteStubHTTPClient(rules: [
+            .init(match: "page=post", status: 404),
+            .init(match: ".mp4", status: 200),
+        ])
+        let media = try await RealbooruSource().resolveMedia(for: post, context: context(client))
+        XCTAssertTrue(media.isVideo)
+        let requests = await client.recordedRequests()
+        let head = try XCTUnwrap(requests.first { $0.httpMethod == "HEAD" })
+        XCTAssertEqual(head.value(forHTTPHeaderField: "Referer"), "https://realbooru.com/")
+        XCTAssertEqual(head.value(forHTTPHeaderField: "User-Agent"), MediaRequestConfiguration.userAgent)
     }
 
     @MainActor

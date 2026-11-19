@@ -10,6 +10,8 @@ struct FavoritesScreen: View {
     private let imageQuality: ImageQuality
     private let gridPreviewsEnabled: Bool
     private let isActive: Bool
+    private let refreshVersion: Int
+    private let onModifySearch: ((TagSearchModification) -> Void)?
     private let onOpenPost: ([BooruPost], Int) -> Void
     private let onSelectTag: (String) -> Void
     /// Optional blacklist store that powers the chip context menu.
@@ -39,16 +41,20 @@ struct FavoritesScreen: View {
         recentViewsStore: any RecentViewsStoring,
         clearRecentViews: (() async -> Void)? = nil,
         isActive: Bool = true,
+        refreshVersion: Int = 0,
         imageQuality: ImageQuality = .auto,
         gridPreviewsEnabled: Bool = true,
         blacklistStore: (any TagListStoring)? = nil,
+        onModifySearch: ((TagSearchModification) -> Void)? = nil,
         onSelectTag: @escaping (String) -> Void = { _ in },
         onOpenPost: @escaping ([BooruPost], Int) -> Void = { _, _ in }
     ) {
         self.imageQuality = imageQuality
         self.gridPreviewsEnabled = gridPreviewsEnabled
         self.isActive = isActive
+        self.refreshVersion = refreshVersion
         self.blacklistStore = blacklistStore ?? TagListStore(directory: JSONFileStore.defaultDirectory(), kind: .blacklisted)
+        self.onModifySearch = onModifySearch
         self.onSelectTag = onSelectTag
         self.onOpenPost = onOpenPost
         _model = State(initialValue: FavoritesViewModel(
@@ -90,6 +96,9 @@ struct FavoritesScreen: View {
         }
         .onChange(of: isActive) { _, active in
             guard active else { return }
+            Task { await model.load() }
+        }
+        .onChange(of: refreshVersion) { _, _ in
             Task { await model.load() }
         }
         .confirmationDialog(
@@ -326,7 +335,7 @@ struct FavoritesScreen: View {
         return HStack(alignment: .top, spacing: Self.columnSpacing) {
             ForEach(columns.indices, id: \.self) { index in
                 LazyVStack(spacing: Self.columnSpacing) {
-                    ForEach(columns[index]) { post in
+                    ForEach(columns[index], id: \.uniqueKey) { post in
                         card(for: post, in: posts, onLongPress: onLongPress)
                     }
                 }
@@ -346,7 +355,7 @@ struct FavoritesScreen: View {
             imageQuality: imageQuality,
             gridPreviewsEnabled: gridPreviewsEnabled,
             isFavorite: model.isFavorite(post),
-            onTap: { onOpenPost(posts, posts.firstIndex(of: post) ?? 0) },
+            onTap: { onOpenPost(posts, posts.firstIndex(where: { postKey($0) == postKey(post) }) ?? 0) },
             onLongPress: longPress
         )
     }
@@ -419,12 +428,20 @@ struct FavoritesScreen: View {
             Label("Search Tag", systemImage: "magnifyingglass")
         }
         Button {
-            onSelectTag("+" + tag)
+            if let onModifySearch {
+                onModifySearch(.include(tag))
+            } else {
+                onSelectTag(tag)
+            }
         } label: {
             Label("Add +\(tag)", systemImage: "plus.circle")
         }
         Button {
-            onSelectTag("-" + tag)
+            if let onModifySearch {
+                onModifySearch(.exclude(tag))
+            } else {
+                onSelectTag("-" + tag)
+            }
         } label: {
             Label("Exclude -\(tag)", systemImage: "minus.circle")
         }

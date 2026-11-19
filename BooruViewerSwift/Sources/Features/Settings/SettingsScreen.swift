@@ -13,8 +13,6 @@ struct SettingsScreen: View {
     }
 
     var body: some View {
-        @Bindable var model = model
-
         ZStack {
             AppTheme.background.ignoresSafeArea()
 
@@ -48,13 +46,6 @@ struct SettingsScreen: View {
         .tint(AppTheme.primary)
         .preferredColorScheme(.dark)
         .task { await model.load() }
-        .alert(item: $model.alert) { state in
-            Alert(
-                title: Text(state.title),
-                message: Text(state.message),
-                dismissButton: .default(Text("OK"))
-            )
-        }
     }
 
     // MARK: - Hero

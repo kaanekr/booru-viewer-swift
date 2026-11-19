@@ -547,13 +547,22 @@ struct HentaiHavenSource: BooruSource {
         }
     }
 
+    static func isPlayableVideoURL(_ url: URL?) -> Bool {
+        guard let url else { return false }
+        let raw = url.absoluteString.lowercased()
+        let path = raw.split(whereSeparator: { $0 == "?" || $0 == "#" }).first.map(String.init) ?? raw
+        return [".m3u8", ".mp4", ".mov", ".m4v", ".webm"].contains { path.hasSuffix($0) }
+    }
+
     /// RN `resolveHentaiHavenEpisodeUrls` (hentaihavens.ts:1417-1447): the series episode list is
     /// read here, then the default (newest) episode's HLS stream or its MP4 fallback is returned.
-    /// Every failure path still exposes the cover and the listing-level video, so the viewer never
-    /// opens onto a bare "Media unavailable" state.
+    /// Every failure path still exposes the cover and any listing-level video, never treating a
+    /// `.jpg` cover image as a video stream.
     func resolveMedia(for post: BooruPost, context: SourceContext) async throws -> ResolvedMedia {
         let placeholder = ImageQualityResolver.placeholderURL(for: post)
-        let fallbackVideo = post.previewVideoURL ?? post.sampleURL
+        let fallbackVideo = [post.previewVideoURL, post.sampleURL]
+            .compactMap { $0 }
+            .first(where: Self.isPlayableVideoURL)
         let episodes: [HentaiHavenEpisode]
         do {
             episodes = try await fetchEpisodes(for: post, context: context)
@@ -650,7 +659,9 @@ struct HentaiHavenSource: BooruSource {
                 await HentaiHavenEpisodeCache.shared.store(models, for: slug)
             }
         }
-        return post.previewVideoURL ?? post.sampleURL ?? post.previewURL
+        return [post.previewVideoURL, post.sampleURL]
+            .compactMap { $0 }
+            .first(where: Self.isPlayableVideoURL)
     }
 
     // MARK: - Detail resolution

@@ -209,6 +209,11 @@ enum SourceQuickFilters {
     static func isActive(_ option: SourceQuickFilter, in filter: SearchFilterConfig) -> Bool {
         switch option.id {
         case "latest":
+            if option.patch.setsHentaiHavenSection {
+                return (filter.hentaiHavenSection ?? .latest) == .latest
+                    && filter.sortBy == .default
+                    && filter.timeRange == .all
+            }
             return filter.sortBy == .default && filter.timeRange == .all
         case "top":
             return filter.sortBy == .score && filter.timeRange == .all

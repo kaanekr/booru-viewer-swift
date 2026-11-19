@@ -418,13 +418,13 @@ final class SettingsViewModel {
         (try? security.verifyPasscode(pin, config: settings.security)) ?? false
     }
 
-    /// Hashes the PIN, enables the lock, and saves the parity placeholder to `AppSettings`.
+    /// Hashes the PIN into Keychain and enables the lock without writing the hash to `settings.json`.
     func setPasscode(_ pin: String) async throws {
         busy = .passcode
         defer { busy = nil }
-        let hash = try security.setPasscode(pin)
+        _ = try security.setPasscode(pin)
         settings.security.enabled = true
-        settings.security.passcodeHash = hash
+        settings.security.passcodeHash = nil
         guard await persist() else {
             refreshSecurity()
             throw SettingsError.saveFailed

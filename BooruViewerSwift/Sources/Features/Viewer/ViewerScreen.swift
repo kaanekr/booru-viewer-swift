@@ -17,6 +17,7 @@ struct ViewerScreen: View {
     @State private var viewModel: ViewerViewModel
     @State private var showControls = true
     @State private var showInfo = false
+    @State private var controlsInteractionToken = 0
 
     /// Live vertical offset of the media while a swipe is in flight, so the
     /// dismiss / info-sheet drag feels attached to the finger
@@ -37,6 +38,7 @@ struct ViewerScreen: View {
         posts: [BooruPost],
         initialIndex: Int = 0,
         context: SourceContext,
+        sourceProvider: @escaping @Sendable (SourceID) -> (any BooruSource)? = { SourceRegistry.source(for: $0) },
         recentViews: (any RecentViewsStoring)? = nil,
         favorites: (any FavoritesStoring)? = nil,
         favoriteTags: (any TagListStoring)? = nil,
@@ -56,6 +58,7 @@ struct ViewerScreen: View {
             posts: posts,
             initialIndex: initialIndex,
             context: context,
+            sourceProvider: sourceProvider,
             recentViews: recentViews,
             favorites: favorites,
             favoriteTags: favoriteTags,
@@ -89,7 +92,11 @@ struct ViewerScreen: View {
                         isActive: index == viewModel.currentIndex,
                         isMangaMode: viewModel.isMangaMode && index == viewModel.currentIndex,
                         galleryPages: viewModel.galleryPages(for: post),
+                        imageQuality: viewModel.context.imageQuality,
+                        isInfoPresented: showInfo,
+                        controlsInteractionToken: controlsInteractionToken,
                         showsControls: showControls,
+                        onSetControlsVisible: { visible in setControlsVisible(visible) },
                         onSingleTap: { toggleControls() },
                         onZoomChanged: { zoomed in isMediaZoomed = zoomed }
                     )
@@ -136,9 +143,7 @@ struct ViewerScreen: View {
                     post: post,
                     viewModel: viewModel,
                     searchHistory: searchHistory,
-                    onModifySearch: onModifySearch,
-                    hentaiHavenLastEpisodes: viewModel.hentaiHavenLastEpisodes,
-                    onSaveHentaiHavenEpisode: viewModel.onSaveHentaiHavenEpisode
+                    onModifySearch: onModifySearch
                 ) { tag in
                     showInfo = false
                     onSelectTag(tag)
@@ -362,6 +367,7 @@ struct ViewerScreen: View {
                     system: viewModel.isMangaMode ? "book.fill" : "book",
                     tint: viewModel.isMangaMode ? AppTheme.primary : AppTheme.textPrimary
                 ) {
+                    controlsInteractionToken &+= 1
                     viewModel.isMangaMode.toggle()
                 }
                 .accessibilityLabel(viewModel.isMangaMode ? "Exit manga mode" : "Manga mode")
@@ -376,6 +382,7 @@ struct ViewerScreen: View {
                     system: isFavorite ? "heart.fill" : "heart",
                     tint: isFavorite ? AppTheme.danger : AppTheme.textPrimary
                 ) {
+                    controlsInteractionToken &+= 1
                     Task { await viewModel.toggleFavorite() }
                 }
                 .accessibilityLabel(isFavorite ? "Remove favorite" : "Add favorite")
@@ -399,6 +406,7 @@ struct ViewerScreen: View {
                         ForEach(episodes) { episode in
                             let isSelected = episode.id == selectedID
                             Button {
+                                controlsInteractionToken &+= 1
                                 viewModel.selectEpisode(episode, for: post)
                             } label: {
                                 Text("Ep \(episode.number)")
@@ -460,8 +468,13 @@ struct ViewerScreen: View {
     }
 
     private func toggleControls() {
+        setControlsVisible(!showControls)
+    }
+
+    private func setControlsVisible(_ visible: Bool) {
+        guard showControls != visible else { return }
         withAnimation(.easeInOut(duration: 0.2)) {
-            showControls.toggle()
+            showControls = visible
         }
     }
 }

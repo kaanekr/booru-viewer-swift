@@ -369,7 +369,22 @@ struct RedGifsSource: BooruSource {
     }
 
     func resolveMedia(for post: BooruPost, context: SourceContext) async throws -> ResolvedMedia {
-        BooruJSONSupport.resolvedMedia(for: post, quality: context.imageQuality)
+        let placeholder = ImageQualityResolver.placeholderURL(for: post)
+        let hd = MediaURLNormalizer.normalize(post.originalURL, sourceID: .redgifs)
+        let sd = MediaURLNormalizer.normalize(post.sampleURL, sourceID: .redgifs)
+        let fallback = VideoCandidateSelector.videoCandidates(for: post).first
+        let video: URL? = switch context.imageQuality {
+        case .preview:
+            sd ?? hd ?? fallback
+        case .auto, .full:
+            hd ?? sd ?? fallback
+        }
+        return ResolvedMedia(
+            imageURL: placeholder ?? post.previewURL,
+            videoURL: video,
+            isVideo: video != nil,
+            placeholderURL: placeholder
+        )
     }
 
     // MARK: - Mapping (RN booruApi.ts:1428-1470)

@@ -395,7 +395,6 @@ struct SourcesSettingsView: View {
         .background(AppTheme.background.ignoresSafeArea())
         .navigationTitle("Sources & API Keys")
         .navigationBarTitleDisplayMode(.inline)
-        .settingsAlert(model)
     }
 
     private var entries: [SourceSheetView.Entry] {
@@ -534,7 +533,6 @@ struct SourceDetailSettingsView: View {
         .background(AppTheme.background.ignoresSafeArea())
         .navigationTitle(entry.name)
         .navigationBarTitleDisplayMode(.inline)
-        .settingsAlert(model)
     }
 
     private var hero: some View {
@@ -764,7 +762,6 @@ struct AppearanceSettingsView: View {
         .background(AppTheme.background.ignoresSafeArea())
         .navigationTitle("Viewing")
         .navigationBarTitleDisplayMode(.inline)
-        .settingsAlert(model)
     }
 }
 
@@ -939,7 +936,6 @@ struct BlacklistSettingsView: View {
         .navigationTitle("Blacklist")
         .navigationBarTitleDisplayMode(.inline)
         .task { await model.refreshBlacklist() }
-        .settingsAlert(model)
         .confirmationDialog(
             "Clear blocked tags?",
             isPresented: $isConfirmingClear,
@@ -1083,7 +1079,7 @@ struct AppLockSettingsView: View {
                     .buttonStyle(.plain)
                 }
 
-                SettingsHint(text: "The PIN is stored as a salted hash in the Keychain. Only the hash leaves the settings document, and only as a migration placeholder.")
+                SettingsHint(text: "The PIN is stored exclusively as a salted hash in the Keychain and is never written to the settings document.")
             }
             .padding(.horizontal, AppTheme.Spacing.screenHorizontal)
             .padding(.vertical, AppTheme.Spacing.section)
@@ -1091,7 +1087,6 @@ struct AppLockSettingsView: View {
         .background(AppTheme.background.ignoresSafeArea())
         .navigationTitle("Privacy & safety")
         .navigationBarTitleDisplayMode(.inline)
-        .settingsAlert(model)
         .sheet(item: $passcodeMode) { mode in
             PasscodeModalView(
                 mode: mode,
@@ -1177,7 +1172,6 @@ struct BackupSettingsView: View {
         .background(AppTheme.background.ignoresSafeArea())
         .navigationTitle("Storage & backup")
         .navigationBarTitleDisplayMode(.inline)
-        .settingsAlert(model)
         .fileExporter(
             isPresented: $model.isExporting,
             document: model.exportDocument,
@@ -1257,7 +1251,6 @@ struct NetworkSettingsView: View {
         .background(AppTheme.background.ignoresSafeArea())
         .navigationTitle("Connection")
         .navigationBarTitleDisplayMode(.inline)
-        .settingsAlert(model)
     }
 
     private var connectionBanner: some View {

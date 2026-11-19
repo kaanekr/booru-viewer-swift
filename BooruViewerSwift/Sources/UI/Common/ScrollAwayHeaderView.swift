@@ -82,6 +82,12 @@ struct ScrollAwayHeaderView<Content: View>: View {
             .background(AppTheme.background)
             .offset(y: isPinned ? 0 : slideOffset)
             .allowsHitTesting(isPinned || !isHidden)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(key: ScrollAwayHeaderHeightKey.self, value: proxy.size.height)
+                }
+            }
+            .clipped()
             .background(alignment: .top) {
                 // RN keeps the safe-area strip opaque while the controls slide away
                 // (ScrollAwayHeader.tsx:22-24). Drawn above the layout, so it changes no height.
@@ -89,11 +95,6 @@ struct ScrollAwayHeaderView<Content: View>: View {
                     AppTheme.background
                         .frame(height: topInset)
                         .offset(y: -topInset)
-                }
-            }
-            .background {
-                GeometryReader { proxy in
-                    Color.clear.preference(key: ScrollAwayHeaderHeightKey.self, value: proxy.size.height)
                 }
             }
     }

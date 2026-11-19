@@ -27,6 +27,7 @@ enum FeedTagSearchAction: Sendable {
 @MainActor
 struct FeedScreen: View {
     private let settings: AppSettings
+    private let blacklistedTags: [String]?
     private let favoriteKeys: Set<String>
     private let onSelectTag: ((String) -> Void)?
     private let onOpenPost: ([BooruPost], Int) -> Void
@@ -96,6 +97,7 @@ struct FeedScreen: View {
         onOpenPost: @escaping ([BooruPost], Int) -> Void
     ) {
         self.settings = settings
+        self.blacklistedTags = blacklistedTags
         self.favoriteKeys = favoriteKeys
         self.onSelectTag = onSelectTag
         self.onOpenPost = onOpenPost
@@ -129,6 +131,7 @@ struct FeedScreen: View {
         onOpenPost: @escaping ([BooruPost], Int) -> Void
     ) {
         self.settings = settings
+        self.blacklistedTags = nil
         self.favoriteKeys = favoriteKeys
         self.onSelectTag = onSelectTag
         self.onOpenPost = onOpenPost
@@ -195,10 +198,18 @@ struct FeedScreen: View {
         }
         .onAppear {
             model.updateContext(context)
+            if let blacklistedTags {
+                model.updateBlacklist(blacklistedTags)
+            }
         }
         .onChange(of: contextVersion) { _, _ in
             // A Worker URL, API key, or quality edit pushes a fresh context into the model.
             model.updateContext(context)
+        }
+        .onChange(of: blacklistedTags) { _, tags in
+            if let tags {
+                model.updateBlacklist(tags)
+            }
         }
         .onChange(of: settings.activeSourceID) { _, newValue in
             guard newValue != model.sourceID else { return }
@@ -312,7 +323,7 @@ struct FeedScreen: View {
 
     private func column(_ posts: [BooruPost], width: CGFloat) -> some View {
         LazyVStack(spacing: Self.columnSpacing) {
-            ForEach(posts) { post in
+            ForEach(posts, id: \.uniqueKey) { post in
                 card(for: post)
             }
             // Skip the sentinel while the memoized split is still empty, so an

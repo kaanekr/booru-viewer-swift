@@ -20,6 +20,9 @@ enum MP4Upgrade {
         var request = URLRequest(url: mp4)
         request.httpMethod = "HEAD" // media.ts:775
         request.timeoutInterval = timeoutSeconds
+        for (name, value) in MediaRequestConfiguration.headers(for: mp4) {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
 
         do {
             let (_, response) = try await http.data(for: request)

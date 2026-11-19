@@ -312,23 +312,46 @@ final class NetworkTests: XCTestCase {
         XCTAssertEqual(stub.requests.map { $0.url?.absoluteString }, [itemURL.absoluteString, relayItemURLString])
     }
 
-    func testProxyAwareRetriesRelayOnceScrubbedWhenEnabledAndForbidden() async throws {
+    func testProxyAwareScrubsFirstRelayLegAndFallsBackDirectWhenForbidden() async throws {
         let stub = ScriptedHTTPClient { request in
-            (Data(), makeResponse(request.url!, status: 403))
+            if request.url?.host == "worker.example.com" {
+                return (Data(), makeResponse(request.url!, status: 403))
+            }
+            return (Data(), makeResponse(request.url!, status: 403))
         }
         let client = ProxyAwareHTTPClient(direct: stub, proxy: ProxyConfig(enabled: true, workerURL: workerURL))
         var original = URLRequest(url: itemURL)
         original.setValue("https://example.com/", forHTTPHeaderField: "Referer")
+        original.setValue("session=secret", forHTTPHeaderField: "Cookie")
 
         let (_, response) = try await client.data(for: original)
 
         XCTAssertEqual(response.statusCode, 403)
         let requests = stub.requests
         XCTAssertEqual(requests.count, 2)
-        // The first relay leg is unscrubbed (proxyService.ts:126); the retry is scrubbed (proxyService.ts:145-148).
-        XCTAssertEqual(requests[0].allHTTPHeaderFields?["Referer"], "https://example.com/")
-        XCTAssertNil(requests[1].allHTTPHeaderFields?["Referer"])
-        XCTAssertEqual(requests[1].url?.absoluteString, relayItemURLString)
+        // Worker-bound leg must scrub Referer/Cookie immediately; fallback leg hits direct origin.
+        XCTAssertEqual(requests[0].url?.absoluteString, relayItemURLString)
+        XCTAssertNil(requests[0].allHTTPHeaderFields?["Referer"])
+        XCTAssertNil(requests[0].allHTTPHeaderFields?["Cookie"])
+        XCTAssertEqual(requests[0].httpShouldHandleCookies, false)
+        XCTAssertEqual(requests[1].url?.absoluteString, itemURL.absoluteString)
+        XCTAssertEqual(requests[1].allHTTPHeaderFields?["Referer"], "https://example.com/")
+    }
+
+    func testProxyAwareFallsBackToDirectWhenRelayThrowsNetworkError() async throws {
+        let stub = ScriptedHTTPClient { request in
+            if request.url?.host == "worker.example.com" {
+                throw BooruError.network("worker down")
+            }
+            return (Data("ok".utf8), makeResponse(request.url!, status: 200))
+        }
+        let client = ProxyAwareHTTPClient(direct: stub, proxy: ProxyConfig(enabled: true, workerURL: workerURL))
+
+        let (data, response) = try await client.data(for: URLRequest(url: itemURL))
+
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertEqual(String(data: data, encoding: .utf8), "ok")
+        XCTAssertEqual(stub.requests.map { $0.url?.absoluteString }, [relayItemURLString, itemURL.absoluteString])
     }
 
     func testProxyAwareRethrowsWhenNoWorkerConfigured() async {

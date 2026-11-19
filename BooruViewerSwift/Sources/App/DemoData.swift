@@ -555,7 +555,7 @@ struct DemoBooruSource: BooruSource {
     static let pageSize = 6
 
     /// Provider handed to the feature view models in `-demoMode`.
-    static let provider: (SourceID) -> (any BooruSource)? = { DemoBooruSource(id: $0) }
+    static let provider: @Sendable (SourceID) -> (any BooruSource)? = { DemoBooruSource(id: $0) }
 
     let id: SourceID
 

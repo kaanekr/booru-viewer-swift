@@ -29,10 +29,6 @@ struct PostInfoSheetView: View {
     private let searchHistory: (any SearchHistoryStoring)?
     /// Applies a search-bar modification; falls back to the view model's.
     private let onModifySearch: (@Sendable (TagSearchModification) -> Void)?
-    /// Last played HentaiHaven episode per post id.
-    private let hentaiHavenLastEpisodes: [String: Int]
-    /// Callback to persist HentaiHaven episode progress.
-    private let onSaveHentaiHavenEpisode: (@Sendable (String, Int) -> Void)?
     /// Tap-to-search callback, e.g. `SearchQuery` push in the app layer.
     let onSelectTag: (String) -> Void
 
@@ -41,16 +37,12 @@ struct PostInfoSheetView: View {
         viewModel: ViewerViewModel,
         searchHistory: (any SearchHistoryStoring)? = nil,
         onModifySearch: (@Sendable (TagSearchModification) -> Void)? = nil,
-        hentaiHavenLastEpisodes: [String: Int] = [:],
-        onSaveHentaiHavenEpisode: (@Sendable (String, Int) -> Void)? = nil,
         onSelectTag: @escaping (String) -> Void
     ) {
         self.post = post
         self.viewModel = viewModel
         self.searchHistory = searchHistory
         self.onModifySearch = onModifySearch
-        self.hentaiHavenLastEpisodes = hentaiHavenLastEpisodes
-        self.onSaveHentaiHavenEpisode = onSaveHentaiHavenEpisode
         self.onSelectTag = onSelectTag
     }
 
@@ -177,16 +169,17 @@ struct PostInfoSheetView: View {
             }
         }
 
+        let resolved = viewModel.resolvedTags(for: post)
         // RN order: copyright, character, artist, general, meta (PostInfoModal.tsx:212-216).
-        append(post.tags.copyright, .copyright)
-        append(post.tags.character, .character)
-        append(post.tags.artist, .artist)
-        append(post.tags.general, .general)
-        append(post.tags.meta, .meta)
+        append(resolved.groups.copyright, .copyright)
+        append(resolved.groups.character, .character)
+        append(resolved.groups.artist, .artist)
+        append(resolved.groups.general, .general)
+        append(resolved.groups.meta, .meta)
 
         // Fallback for uncategorized posts (PostInfoModal.tsx:219-227).
         if items.isEmpty {
-            append(post.allTags, .general)
+            append(resolved.allTags, .general)
         }
         return items
     }
@@ -224,7 +217,8 @@ struct PostInfoSheetView: View {
 
         return HStack(spacing: 0) {
             Button {
-                selectTag(item.name)
+                let token = Self.formattedSearchToken(for: item.name, category: item.category, sourceID: post.sourceID)
+                selectTag(token.isEmpty ? item.name : token)
             } label: {
                 Text(shown)
                     .font(.system(size: 13, weight: isPinned ? .bold : .semibold))
@@ -282,7 +276,7 @@ struct PostInfoSheetView: View {
     /// The seven tag actions of RN `PostInfoModal` (PostInfoModal.tsx:806-880).
     @ViewBuilder
     private func tagMenu(for item: PostInfoTagItem) -> some View {
-        let token = formattedSearchToken(for: item.name, category: item.category, sourceID: post.sourceID)
+        let token = Self.formattedSearchToken(for: item.name, category: item.category, sourceID: post.sourceID)
         let isPinned = viewModel.favoriteTagSet.contains(ViewerViewModel.favoriteTagKey(item.name)) || viewModel.isPinnedTag(item.name)
         let isBlacklisted = viewModel.blacklistedTagSet.contains(ViewerViewModel.blacklistTagKey(item.name)) || viewModel.isBlacklistedTag(item.name)
 
@@ -482,7 +476,7 @@ struct PostInfoSheetView: View {
 
     /// Source-specific search token for a tag (RN `nhentaiTagQuery`,
     /// `hentaiHavenTagQuery`, and the RedGifs `user:` rule).
-    private func formattedSearchToken(for tag: String, category: TagCategory, sourceID: SourceID) -> String {
+    static func formattedSearchToken(for tag: String, category: TagCategory, sourceID: SourceID) -> String {
         let clean = tag
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "\""))

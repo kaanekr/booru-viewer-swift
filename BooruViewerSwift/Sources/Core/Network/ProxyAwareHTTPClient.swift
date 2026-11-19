@@ -31,16 +31,24 @@ struct ProxyAwareHTTPClient: HTTPClientProtocol, Sendable {
         let relayEnabled = proxy.enabled && worker != nil
         // proxyService.ts:204-209 proxyUrl: TLS-fragile hosts are relayed even when the toggle is off.
         let relayPreferred = relayEnabled || ProxyRelay.isTLSFragile(url)
+        let primaryIsRelay = relayPreferred && fallbackURL != nil
         // proxyService.ts:126 with proxyUrl (:197-211): relay when preferred, otherwise direct.
-        let primaryURL: URL = (relayPreferred ? fallbackURL : nil) ?? url
+        let primaryURL: URL = (primaryIsRelay ? fallbackURL : nil) ?? url
 
         let first: (Data, HTTPURLResponse)
         do {
-            first = try await direct.data(for: ProxyAwareHTTPClient.retarget(request, to: primaryURL))
+            if primaryIsRelay {
+                first = try await send(request, original: url, to: primaryURL, sanitize: sanitize)
+            } else {
+                first = try await direct.data(for: ProxyAwareHTTPClient.retarget(request, to: primaryURL))
+            }
         } catch {
-            // proxyService.ts:131-136: caller cancellation is final; otherwise fall back when a different worker URL exists.
+            // proxyService.ts:131-136: caller cancellation is final; otherwise fall back when an alternate route exists.
             if error is CancellationError || Task.isCancelled {
                 throw error
+            }
+            if primaryIsRelay {
+                return try await direct.data(for: request)
             }
             guard let relay = fallbackURL, relay != primaryURL else {
                 throw error
@@ -53,13 +61,19 @@ struct ProxyAwareHTTPClient: HTTPClientProtocol, Sendable {
         guard status == 403 || status == 429 || status >= 500 else {
             return first
         }
+        if primaryIsRelay {
+            do {
+                return try await direct.data(for: request)
+            } catch {
+                if error is CancellationError || Task.isCancelled {
+                    throw error
+                }
+                return first
+            }
+        }
         // proxyService.ts:141-144: retry through the worker when it is a different URL.
         if let relay = fallbackURL, relay != primaryURL {
             return try await send(request, original: url, to: relay, sanitize: sanitize)
-        }
-        // proxyService.ts:145-148: with the toggle on, retry the relay once with scrubbed headers.
-        if sanitize && relayEnabled {
-            return try await send(request, original: url, to: primaryURL, sanitize: true)
         }
         return first
     }

@@ -9,6 +9,7 @@ import UIKit
 @MainActor
 struct SearchScreen: View {
     private let activeSourceID: SourceID
+    private let blacklistedTags: [String]
     private let favoriteKeys: Set<String>
     private let imageQuality: ImageQuality
     private let gridPreviewsEnabled: Bool
@@ -16,6 +17,7 @@ struct SearchScreen: View {
     private let context: SourceContext
     /// Bumped by the app layer whenever the request context (Worker, keys, quality) changes.
     private let contextVersion: Int
+    private let onSelectSource: ((SourceID) -> Void)?
     private let onOpenTag: ((String) -> Void)?
     private let onToggleFavorite: ((BooruPost) -> Void)?
     private let onOpenPost: ([BooruPost], Int) -> Void
@@ -33,6 +35,8 @@ struct SearchScreen: View {
     @State private var headerHeight: CGFloat = 64
     /// Continuous collapse of the header, driven by the list scroll offset.
     @State private var headerState = ScrollAwayHeaderState()
+    /// Memoized masonry split: rebuilt only when results or column width change.
+    @State private var columns: [[BooruPost]] = [[], []]
 
     /// RN `POPULAR_TAGS` (SearchScreen.tsx:66-77) plus a wider set of community favourites,
     /// so the popular section fills the viewport instead of leaving the lower half empty.
@@ -75,11 +79,13 @@ struct SearchScreen: View {
         initialFilter: SearchFilterConfig? = nil,
         favoriteTagsStore: (any TagListStoring)? = nil,
         blacklistStore: (any TagListStoring)? = nil,
+        onSelectSource: ((SourceID) -> Void)? = nil,
         onOpenTag: ((String) -> Void)? = nil,
         onToggleFavorite: ((BooruPost) -> Void)? = nil,
         onOpenPost: @escaping ([BooruPost], Int) -> Void = { _, _ in }
     ) {
         self.activeSourceID = activeSourceID
+        self.blacklistedTags = blacklistedTags
         self.favoriteKeys = favoriteKeys
         self.imageQuality = imageQuality
         self.gridPreviewsEnabled = gridPreviewsEnabled
@@ -87,6 +93,7 @@ struct SearchScreen: View {
         self.contextVersion = contextVersion
         self.favoriteTagsStore = favoriteTagsStore ?? TagListStore(directory: JSONFileStore.defaultDirectory(), kind: .favorite)
         self.blacklistStore = blacklistStore ?? TagListStore(directory: JSONFileStore.defaultDirectory(), kind: .blacklisted)
+        self.onSelectSource = onSelectSource
         self.onOpenTag = onOpenTag
         self.onToggleFavorite = onToggleFavorite
         self.onOpenPost = onOpenPost
@@ -152,6 +159,9 @@ struct SearchScreen: View {
             // A Worker URL, API key, or quality edit pushes a fresh context into the model.
             model.updateContext(context)
         }
+        .onChange(of: blacklistedTags) { _, tags in
+            model.updateBlacklist(tags)
+        }
         .onChange(of: isSearchFieldFocused) { _, focused in
             model.inputFocusChanged(focused)
         }
@@ -166,6 +176,7 @@ struct SearchScreen: View {
         .sheet(isPresented: $isSourceSheetPresented) {
             SourceSheetView(selectedSource: model.sourceID) { id in
                 isSourceSheetPresented = false
+                onSelectSource?(id)
                 model.selectSource(id)
             }
             .presentationDetents([.medium, .large])
@@ -297,9 +308,16 @@ struct SearchScreen: View {
                     model.runSearch()
                 }
 
-            if !model.query.isEmpty {
+            if !model.query.isEmpty || model.isSearchActive {
                 Button {
-                    model.setQuery("")
+                    if !model.query.isEmpty && isSearchFieldFocused {
+                        model.setQuery("")
+                    } else if model.isSearchActive {
+                        isSearchFieldFocused = false
+                        model.exitSearch()
+                    } else {
+                        model.setQuery("")
+                    }
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: AppTheme.Icon.small))
@@ -417,7 +435,8 @@ struct SearchScreen: View {
 
     private var resultsContent: some View {
         GeometryReader { geometry in
-            let columnWidth = Self.columnWidth(for: geometry.size.width)
+            let width = geometry.size.width
+            let columnWidth = Self.columnWidth(for: width)
             tracksHeaderScroll(
                 ScrollView {
                     LazyVStack(spacing: AppTheme.Spacing.section) {
@@ -446,26 +465,60 @@ struct SearchScreen: View {
                 .scrollIndicators(.hidden)
                 .scrollDismissesKeyboard(.interactively)
             )
+            .onAppear {
+                rebuildColumns(width: width)
+            }
+            .onChange(of: width) { _, newWidth in
+                rebuildColumns(width: newWidth)
+            }
+            .onChange(of: model.results) { _, _ in
+                rebuildColumns(width: width)
+            }
         }
     }
 
-    /// Two height-balanced columns (same `MasonryColumns` pass as `FeedScreen`),
-    /// so tall cards never leave holes under the shorter column.
+    /// Memoized two height-balanced columns (matching `FeedScreen`).
     private func grid(columnWidth: CGFloat) -> some View {
-        var masonry = MasonryColumns()
-        let columns = masonry.layout(model.results) { post in
-            MasonryColumns.estimatedHeight(for: post, columnWidth: columnWidth)
-        }
-        return HStack(alignment: .top, spacing: Self.columnSpacing) {
+        HStack(alignment: .top, spacing: Self.columnSpacing) {
             ForEach(columns.indices, id: \.self) { index in
                 LazyVStack(spacing: Self.columnSpacing) {
-                    ForEach(columns[index]) { post in
+                    ForEach(columns[index], id: \.uniqueKey) { post in
                         card(for: post)
+                    }
+                    if !columns[index].isEmpty {
+                        paginationSentinel
                     }
                 }
                 .frame(width: columnWidth > 0 ? columnWidth : nil, alignment: .top)
             }
         }
+    }
+
+    private func rebuildColumns(width: CGFloat) {
+        let posts = model.results
+        guard !posts.isEmpty else {
+            if !columns.allSatisfy(\.isEmpty) {
+                columns = [[], []]
+            }
+            return
+        }
+
+        let columnWidth = Self.columnWidth(for: width)
+        var masonry = MasonryColumns()
+        let next = masonry.layout(posts) { post in
+            MasonryColumns.estimatedHeight(for: post, columnWidth: columnWidth)
+        }
+        if next != columns {
+            columns = next
+        }
+    }
+
+    private var paginationSentinel: some View {
+        Color.clear
+            .frame(height: 1)
+            .onAppear {
+                model.loadMore()
+            }
     }
 
     private func card(for post: BooruPost) -> some View {
@@ -478,12 +531,6 @@ struct SearchScreen: View {
             onTap: { open(post) },
             onLongPress: longPress
         )
-        .onAppear {
-            // Prefetch the next page when the last card appears (RN `onEndReached`).
-            if post.id == model.results.last?.id {
-                model.loadMore()
-            }
-        }
     }
 
     /// Equal column width that fits the measured grid exactly.
@@ -703,13 +750,13 @@ struct SearchScreen: View {
         }
         Button {
             isSearchFieldFocused = false
-            model.search(text: "+" + tag, mode: .add)
+            model.search(text: tag, mode: .add)
         } label: {
             Label("Add +\(tag)", systemImage: "plus.circle")
         }
         Button {
             isSearchFieldFocused = false
-            model.search(text: "-" + tag, mode: .exclude)
+            model.search(text: tag, mode: .exclude)
         } label: {
             Label("Exclude -\(tag)", systemImage: "minus.circle")
         }

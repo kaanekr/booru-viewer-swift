@@ -53,6 +53,7 @@ struct RootTabView: View {
     @State private var pendingSearch: String?
     /// Bumped on every requested search so the Search screen is rebuilt with the new query.
     @State private var searchToken = 0
+    @State private var viewerDismissVersion = 0
     @State private var settingsModel: SettingsViewModel
 
     init(container: AppContainer) {
@@ -142,6 +143,7 @@ struct RootTabView: View {
                 posts: presentation.posts,
                 initialIndex: presentation.index,
                 context: container.makeSourceContext(),
+                sourceProvider: container.sourceProvider,
                 recentViews: container.recentViewsStore,
                 favorites: container.favoritesStore,
                 favoriteTags: container.favoriteTagsStore,
@@ -244,6 +246,9 @@ struct RootTabView: View {
                 initialQuery: pendingSearch,
                 favoriteTagsStore: container.favoriteTagsStore,
                 blacklistStore: container.blacklistedTagsStore,
+                onSelectSource: { id in
+                    Task { @MainActor in await container.persistActiveSource(id) }
+                },
                 onOpenTag: { tag in openTag(tag) },
                 onToggleFavorite: { post in
                     Task { @MainActor in await container.toggleFavorite(post) }
@@ -264,9 +269,11 @@ struct RootTabView: View {
                 recentViewsStore: container.recentViewsStore,
                 clearRecentViews: { await container.clearRecentViews() },
                 isActive: selectedTab == .favorites,
+                refreshVersion: viewerDismissVersion,
                 imageQuality: container.settings.imageQuality,
                 gridPreviewsEnabled: container.settings.gridPreviews,
                 blacklistStore: container.blacklistedTagsStore,
+                onModifySearch: { modification in applySearchModification(modification) },
                 onSelectTag: { tag in openTag(tag) },
                 onOpenPost: { posts, index in openViewer(posts, index) }
             )
@@ -278,6 +285,7 @@ struct RootTabView: View {
         NavigationStack {
             SettingsScreen(viewModel: settingsModel)
         }
+        .settingsAlert(settingsModel)
         .background(AppTheme.background.ignoresSafeArea())
     }
 
@@ -301,10 +309,19 @@ struct RootTabView: View {
             context: container.makeSourceContext(),
             historyStore: container.searchHistoryStore,
             blacklistedTags: container.blacklistedTags,
+            favoriteKeys: container.favoriteKeys,
             imageQuality: container.settings.imageQuality,
             gridPreviewsEnabled: container.settings.gridPreviews,
             contextVersion: container.contextVersion,
             sourceProvider: container.sourceProvider,
+            favoriteTagsStore: container.favoriteTagsStore,
+            blacklistStore: container.blacklistedTagsStore,
+            onSelectSource: { id in
+                Task { @MainActor in await container.persistActiveSource(id) }
+            },
+            onToggleFavorite: { post in
+                Task { @MainActor in await container.toggleFavorite(post) }
+            },
             onOpenPost: { posts, index in openViewer(posts, index) }
         )
     }
@@ -356,6 +373,7 @@ struct RootTabView: View {
     }
 
     private func reloadAfterViewer() {
-        Task { @MainActor in await container.reloadFavorites() }
+        viewerDismissVersion &+= 1
+        Task { @MainActor in await container.reloadSharedState() }
     }
 }

@@ -27,8 +27,9 @@ final class ViewerViewModel {
 
     private(set) var mediaByKey: [String: ResolvedMedia] = [:]
     private(set) var loadingKeys: Set<String> = []
-    /// Gallery pages per post, resolved from the source (`NHentaiSource.galleryPages`).
+    /// Gallery pages per post, resolved from the source (`NHentaiSource.galleryDetail`).
     private(set) var galleryPagesByKey: [String: [URL]] = [:]
+    private(set) var resolvedTagsByKey: [String: (groups: BooruTagGroups, allTags: [String])] = [:]
     private(set) var loadingGalleryKeys: Set<String> = []
     private(set) var favoriteKeys: Set<String> = []
     private(set) var savingFavorite = false
@@ -205,7 +206,9 @@ final class ViewerViewModel {
         let key = postKey(post)
         let resolved = try? await source.resolveEpisodeStream(episode: episode, post: post, context: context)
         guard !Task.isCancelled else { return }
-        let stream = resolved ?? episode.streamURL
+        let stream = (resolved ?? episode.streamURL).flatMap {
+            HentaiHavenSource.isPlayableVideoURL($0) ? $0 : nil
+        }
         let placeholder = ImageQualityResolver.placeholderURL(for: post)
 
         if let stream {
@@ -227,6 +230,10 @@ final class ViewerViewModel {
 
     // MARK: Media resolution
 
+    func resolvedTags(for post: BooruPost) -> (groups: BooruTagGroups, allTags: [String]) {
+        resolvedTagsByKey[postKey(post)] ?? (post.tags, post.allTags)
+    }
+
     func media(for post: BooruPost) -> ResolvedMedia? {
         mediaByKey[postKey(post)]
     }
@@ -235,7 +242,7 @@ final class ViewerViewModel {
         loadingKeys.contains(postKey(post))
     }
 
-    /// Resolves and caches the gallery pages of one post. Only nhentai has a paged
+    /// Resolves and caches the gallery pages and tags of one post. Only nhentai has a paged
     /// gallery; a cancelled or failed load is deliberately left uncached so swiping
     /// back to the post retries instead of showing an empty reader forever.
     func loadGalleryPages(for post: BooruPost) async {
@@ -247,11 +254,14 @@ final class ViewerViewModel {
 
         let source = (sourceProvider(post.sourceID) as? NHentaiSource) ?? NHentaiSource()
         do {
-            let pages = try await source.galleryPages(for: post, context: context)
+            let detail = try await source.galleryDetail(for: post, context: context)
             guard !Task.isCancelled else { return }
-            galleryPagesByKey[key] = pages
+            galleryPagesByKey[key] = detail.pages
+            if !detail.allTags.isEmpty {
+                resolvedTagsByKey[key] = (detail.tags, detail.allTags)
+            }
             let isSamePost = currentPost.map { postKey($0) == key } ?? false
-            if isSamePost, pages.count > 1 {
+            if isSamePost, detail.pages.count > 1 {
                 isMangaMode = true
             }
         } catch {
@@ -470,8 +480,8 @@ final class ViewerViewModel {
     /// re-read the favorite state, resolve media and prefetch neighbours
     /// (ImageViewerModal.tsx:157-249).
     func prepareCurrentPage() async {
-        await recordViewIfNeeded()
-        await refreshFavorite()
+        async let recordTask: Void = recordViewIfNeeded()
+        async let favoriteTask: Void = refreshFavorite()
         if let post = currentPost {
             let key = postKey(post)
             if post.sourceID == .hentaihaven {
@@ -488,6 +498,7 @@ final class ViewerViewModel {
             }
             await loadMedia(for: post)
         }
+        _ = await (recordTask, favoriteTask)
         prefetchNeighbors()
     }
 

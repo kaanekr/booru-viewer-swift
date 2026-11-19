@@ -39,7 +39,8 @@ final class FeedViewModel {
 
     private(set) var context: SourceContext
     private let sourceProvider: SourceProvider
-    private let blacklist: BlacklistMatcher
+    private var blacklist: BlacklistMatcher
+    private var allPosts: [BooruPost] = []
 
     private(set) var sourceID: SourceID
     /// Structured feed filter: the saved order plus any quick-filter patch.
@@ -108,6 +109,16 @@ final class FeedViewModel {
     }
 
     // MARK: Loading
+
+    /// Applies a new blacklist and re-filters the posts already loaded in memory.
+    func updateBlacklist(_ tags: [String]) {
+        blacklist = BlacklistMatcher(tags: tags)
+        let filtered = allPosts.filter { !blacklist.isBlocked($0) }
+        if filtered != posts {
+            posts = filtered
+            rebuildTrendingTags()
+        }
+    }
 
     /// Swaps the transport/credentials after a Settings edit.
     ///
@@ -189,6 +200,7 @@ final class FeedViewModel {
         config.hentaiHavenSection = normalized.hentaiHavenSection
         filter = config
 
+        allPosts = []
         posts = []
         trendingTags = []
         await reload(showLoading: true)
@@ -260,6 +272,7 @@ final class FeedViewModel {
     ) async {
         guard let source = sourceProvider(sourceID) else {
             if replacing {
+                allPosts = []
                 posts = []
                 trendingTags = []
                 phase = .failed("The \(sourceID.rawValue) source is not available yet.")
@@ -282,13 +295,14 @@ final class FeedViewModel {
             guard requestGeneration == generation,
                   ignoreCancellation || !Task.isCancelled else { return }
 
-            let existing = replacing ? [] : posts
-            let fresh = uniquePosts(result.posts, excluding: existing)
+            let existing = replacing ? [] : allPosts
+            let fresh = deduplicatedPosts(result.posts, excluding: existing)
             if replacing {
-                posts = fresh
+                allPosts = fresh
             } else {
-                posts += fresh
+                allPosts += fresh
             }
+            posts = allPosts.filter { !blacklist.isBlocked($0) }
 
             if fresh.isEmpty {
                 // An empty or fully duplicated page ends the feed quietly
@@ -316,14 +330,13 @@ final class FeedViewModel {
         }
     }
 
-    /// Applies the blacklist and drops posts already in the list
-    /// (FeedScreen.tsx:182-190, booruApi.ts:385-464).
-    private func uniquePosts(_ candidates: [BooruPost], excluding existing: [BooruPost]) -> [BooruPost] {
+    /// Drops posts already in the list while preserving unblocked & blocked items in `allPosts`
+    /// so later `updateBlacklist(_:)` edits can reveal previously blocked posts without refetching.
+    private func deduplicatedPosts(_ candidates: [BooruPost], excluding existing: [BooruPost]) -> [BooruPost] {
         var keys = Set(existing.map(postKey))
         var result: [BooruPost] = []
         result.reserveCapacity(candidates.count)
         for post in candidates {
-            guard !blacklist.isBlocked(post) else { continue }
             guard keys.insert(postKey(post)).inserted else { continue }
             result.append(post)
         }

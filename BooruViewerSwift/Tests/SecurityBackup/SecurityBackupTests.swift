@@ -350,16 +350,18 @@ final class SecurityBackupTests: XCTestCase {
         XCTAssertTrue(controller.isPrivacyCurtainVisible)
         XCTAssertFalse(controller.isCheckingBackgroundLock)
 
-        // `autoLockImmediately == false` still locks on `background`: RN's AppState handler only
-        // checks whether a passcode is enabled, never the auto-lock flag.
+        // `autoLockImmediately == false` does not lock on `.background` (though cold launch still locks).
         let delayed = AppLockController(
             service: makeSecurityService(store: store),
             settings: StubSettingsStore(makeSettings(enabled: true, autoLockImmediately: false))
         )
         await delayed.handleScenePhase(.background)
-        XCTAssertTrue(delayed.isLocked)
+        XCTAssertFalse(delayed.isLocked)
         XCTAssertTrue(delayed.isPrivacyCurtainVisible)
         XCTAssertFalse(delayed.isCheckingBackgroundLock)
+
+        await delayed.prepareForLaunch()
+        XCTAssertTrue(delayed.isLocked)
     }
 
     @MainActor

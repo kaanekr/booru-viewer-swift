@@ -26,7 +26,7 @@ final class AppContainer {
     /// Parsed launch arguments; every flag is off for a normal launch.
     let launchOptions: LaunchOptions
     /// Source lookup: the demo adapter in `-demoMode`, the real registry otherwise.
-    let sourceProvider: (SourceID) -> (any BooruSource)?
+    let sourceProvider: @Sendable (SourceID) -> (any BooruSource)?
 
     // MARK: - Services
 

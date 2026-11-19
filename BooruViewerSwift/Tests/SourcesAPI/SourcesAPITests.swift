@@ -93,8 +93,12 @@ final class SourcesAPITests: XCTestCase {
         SearchQuery(tags: tags, filter: filter)
     }
 
-    private func context(http: any HTTPClientProtocol, proxy: ProxyConfig = ProxyConfig()) -> SourceContext {
-        SourceContext(http: http, proxy: proxy, gelbooruAuth: nil, rule34Auth: nil, imageQuality: .auto)
+    private func context(
+        http: any HTTPClientProtocol,
+        proxy: ProxyConfig = ProxyConfig(),
+        imageQuality: ImageQuality = .auto
+    ) -> SourceContext {
+        SourceContext(http: http, proxy: proxy, gelbooruAuth: nil, rule34Auth: nil, imageQuality: imageQuality)
     }
 
     /// The token caches are process-wide; each test starts from a cold cache.
@@ -334,6 +338,26 @@ final class SourcesAPITests: XCTestCase {
         )
     }
 
+    func testRedGifsResolveMediaSelectsHDForAutoAndFullAndSDForPreview() async throws {
+        await resetCaches()
+        let http = SourcesAPIFakeHTTPClient(rules: [
+            .init(match: "/v2/auth/temporary", body: #"{"token":"tok_example"}"#),
+            .init(match: "/v2/gifs/search", body: redGifsSearchBody),
+        ])
+        let source = RedGifsSource()
+        let page = try await source.fetchPosts(query: query("cat_girl"), page: 1, context: context(http: http))
+        let post = try XCTUnwrap(page.posts.first)
+
+        let autoMedia = try await source.resolveMedia(for: post, context: context(http: http, imageQuality: .auto))
+        XCTAssertEqual(autoMedia.videoURL?.absoluteString, "https://media.redgifs.com/abc-hd.mp4")
+
+        let fullMedia = try await source.resolveMedia(for: post, context: context(http: http, imageQuality: .full))
+        XCTAssertEqual(fullMedia.videoURL?.absoluteString, "https://media.redgifs.com/abc-hd.mp4")
+
+        let previewMedia = try await source.resolveMedia(for: post, context: context(http: http, imageQuality: .preview))
+        XCTAssertEqual(previewMedia.videoURL?.absoluteString, "https://media.redgifs.com/abc-sd.mp4")
+    }
+
     // MARK: - nhentai (nhentai.ts:286-465)
 
     func testNhentaiGalleryPageURLsFollowTheDetailNumbers() throws {
@@ -428,6 +452,35 @@ final class SourcesAPITests: XCTestCase {
         XCTAssertEqual(requests[0].url?.absoluteString, "https://nhentai.net/api/v2/galleries?page=1&per_page=25")
         XCTAssertNil(requests[0].value(forHTTPHeaderField: "Referer"))
         XCTAssertEqual(requests[1].url?.absoluteString, "https://nhentai.net/api/v2/galleries/11")
+    }
+
+    func testNhentaiGalleryDetailParsesCategorizedTags() async throws {
+        await resetCaches()
+        let detailBody = """
+        {"media_id":"99","pages":[{"number":1,"path":"galleries/99/1.jpg"},{"number":2,"path":"galleries/99/2.jpg"}],
+         "tags":[
+           {"name":"Example Artist","type":"artist","count":10},
+           {"name":"Original Work","type":"parody","count":50},
+           {"name":"Heroine","type":"character","count":20},
+           {"name":"English","type":"language","count":1000},
+           {"name":"Full &amp; Color","type":"tag","count":40}
+         ]}
+        """
+        let http = SourcesAPIFakeHTTPClient(rules: [
+            .init(match: "/api/v2/galleries/11", body: detailBody),
+            .init(match: "/api/v2/galleries", body: nhentaiListingBody),
+        ])
+        let source = NHentaiSource()
+        let page = try await source.fetchPosts(query: query(), page: 1, context: context(http: http))
+        let post = try XCTUnwrap(page.posts.first)
+
+        let detail = try await source.galleryDetail(for: post, context: context(http: http))
+        XCTAssertEqual(detail.pages.count, 2)
+        XCTAssertEqual(detail.tags.artist, ["Example Artist"])
+        XCTAssertEqual(detail.tags.copyright, ["Original Work"])
+        XCTAssertEqual(detail.tags.character, ["Heroine"])
+        XCTAssertEqual(detail.tags.general, ["Full & Color"])
+        XCTAssertEqual(detail.tags.meta, ["manga", "English"])
     }
 
     func testNhentaiSortAndCandidateURLs() {
@@ -576,6 +629,32 @@ final class SourcesAPITests: XCTestCase {
         XCTAssertEqual(HentaiHavenSource.findGenre(genres, "uncensored")?.termID, 107)
         XCTAssertEqual(HentaiHavenSource.findGenre(genres, "Yaoi")?.termID, 104)
         XCTAssertNil(HentaiHavenSource.findGenre(genres, "no such genre"))
+    }
+
+    func testHentaiHavenNeverReturnsCoverImageAsVideoStream() async throws {
+        await resetCaches()
+        let http = SourcesAPIFakeHTTPClient(rules: [
+            .init(match: "/v1/warden", body: #"{"data":{"token":"warden_example"}}"#),
+            .init(match: "/v1/hentai/all?p=1", body: hentaiHavenListingBody),
+            .init(match: "/v1/hentai/321", body: #"{"data":{"post_ID":321,"post_episodes":[]}}"#),
+        ])
+        let source = HentaiHavenSource()
+        let page = try await source.fetchPosts(query: query(), page: 1, context: context(http: http))
+        let post = try XCTUnwrap(page.posts.first)
+
+        let resolved = try await source.resolveMedia(for: post, context: context(http: http))
+        XCTAssertFalse(resolved.isVideo)
+        XCTAssertNil(resolved.videoURL)
+
+        let dummyEpisode = HentaiHavenEpisode(
+            id: "ep_1",
+            number: 1,
+            title: "Ep 1",
+            streamURL: nil,
+            thumbnailURL: post.previewURL
+        )
+        let stream = try await source.resolveEpisodeStream(episode: dummyEpisode, post: post, context: context(http: http))
+        XCTAssertNil(stream)
     }
 
     // MARK: - Canned bodies

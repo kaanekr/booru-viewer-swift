@@ -218,17 +218,53 @@ struct NHentaiSource: BooruSource {
 
     // MARK: - Gallery pages
 
-    /// Every page URL of one gallery, for the manga reader (RN nhentai.ts:373-435).
-    ///
-    /// The v2 detail body is tried first (with the v1 `images.pages` shape decoded from the same
-    /// payload). When the call fails, is challenged, or carries no usable pages, the cover chain
-    /// supplies a displayable page so the viewer never ends up with nothing to show.
-    func galleryPages(for post: BooruPost, context: SourceContext) async throws -> [URL] {
+    struct GalleryDetail: Sendable, Equatable {
+        let pages: [URL]
+        let tags: BooruTagGroups
+        let allTags: [String]
+    }
+
+    /// Categorized tag groups parsed from `/api/v2/galleries/{id}` (nhentai.ts:340-370).
+    static func tagGroups(from detail: NHentaiGalleryDetailDTO) -> (groups: BooruTagGroups, allTags: [String]) {
+        var artist: [String] = []
+        var character: [String] = []
+        var copyright: [String] = []
+        var general: [String] = []
+        var meta: [String] = ["manga"]
+
+        for tag in detail.tags {
+            let clean = decodeEntities(tag.name ?? "").booruTrimmed
+            guard !clean.isEmpty else { continue }
+            switch tagCategory(tag.type) {
+            case .artist: artist.append(clean)
+            case .character: character.append(clean)
+            case .copyright: copyright.append(clean)
+            case .general: general.append(clean)
+            case .meta: meta.append(clean)
+            }
+        }
+
+        let groups = BooruTagGroups(
+            artist: BooruJSONSupport.uniqued(artist),
+            character: BooruJSONSupport.uniqued(character),
+            copyright: BooruJSONSupport.uniqued(copyright),
+            general: BooruJSONSupport.uniqued(general),
+            meta: BooruJSONSupport.uniqued(meta)
+        )
+        let allTags = BooruJSONSupport.uniqued(
+            groups.copyright + groups.character + groups.artist + groups.general + groups.meta
+        )
+        return (groups, allTags)
+    }
+
+    /// Full gallery detail: pages plus categorized tags (when returned by `/api/v2/galleries/{id}`).
+    func galleryDetail(for post: BooruPost, context: SourceContext) async throws -> GalleryDetail {
         let galleryID = NHentaiSource.galleryID(for: post)
-        let fallback = NHentaiSource.fallbackPageURLs(for: post)
+        let fallbackPages = NHentaiSource.fallbackPageURLs(for: post)
+        let fallbackResult = GalleryDetail(pages: fallbackPages, tags: post.tags, allTags: post.allTags)
         guard !galleryID.isEmpty,
               let url = NHentaiSource.url("galleries/\(BooruJSONSupport.encode(galleryID))") else {
-            return fallback
+            return fallbackResult
         }
 
         let data: Data
@@ -237,20 +273,25 @@ struct NHentaiSource: BooruSource {
         } catch let error as CancellationError {
             throw error
         } catch {
-            return fallback
+            return fallbackResult
         }
-        guard !NHentaiSource.isChallenge(body: data) else { return fallback }
+        guard !NHentaiSource.isChallenge(body: data) else { return fallbackResult }
 
         guard let detail = try? BooruJSONSupport.decode(
             NHentaiGalleryDetailDTO.self,
             from: data,
             failure: "nhentai gallery detail did not return valid JSON."
         ) else {
-            return fallback
+            return fallbackResult
         }
+
+        let parsedTags = detail.tags.isEmpty
+            ? (groups: post.tags, allTags: post.allTags)
+            : NHentaiSource.tagGroups(from: detail)
+
         let pages = NHentaiSource.pageURLs(fromDetail: detail)
         if !pages.isEmpty {
-            return pages
+            return GalleryDetail(pages: pages, tags: parsedTags.groups, allTags: parsedTags.allTags)
         }
         let synthetic = NHentaiSource.syntheticPageURLs(
             mediaID: detail.mediaID ?? post.mediaId ?? "",
@@ -258,9 +299,18 @@ struct NHentaiSource: BooruSource {
             fileExt: post.fileExt
         )
         if !synthetic.isEmpty {
-            return synthetic
+            return GalleryDetail(pages: synthetic, tags: parsedTags.groups, allTags: parsedTags.allTags)
         }
-        return fallback
+        return GalleryDetail(pages: fallbackPages, tags: parsedTags.groups, allTags: parsedTags.allTags)
+    }
+
+    /// Every page URL of one gallery, for the manga reader (RN nhentai.ts:373-435).
+    ///
+    /// The v2 detail body is tried first (with the v1 `images.pages` shape decoded from the same
+    /// payload). When the call fails, is challenged, or carries no usable pages, the cover chain
+    /// supplies a displayable page so the viewer never ends up with nothing to show.
+    func galleryPages(for post: BooruPost, context: SourceContext) async throws -> [URL] {
+        try await galleryDetail(for: post, context: context).pages
     }
 
     /// Page URLs assembled from the post itself when the gallery endpoints give nothing back.

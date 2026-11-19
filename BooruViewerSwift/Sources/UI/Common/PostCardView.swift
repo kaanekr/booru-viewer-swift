@@ -85,14 +85,35 @@ struct PostCardView: View {
 
     // MARK: Cover
 
-    /// Cover chain: static images first (poster, thumbnail, requested quality),
-    /// video URLs last so `MediaImageLoader` can extract a poster frame when the
-    /// card has no still image at all (Cum.st, raw video links).
-    private var coverCandidates: [URL] {
+    private static let highResGridSources: Set<SourceID> = [.gelbooru, .rule34, .danbooru, .yandere, .realbooru]
+
+    private static func isAnimatedImage(_ post: BooruPost) -> Bool {
+        let ext = post.fileExt?.lowercased()
+        if ext == "gif" || ext == "zip" { return true }
+        for url in [post.sampleURL, post.originalURL].compactMap({ $0 }) {
+            let raw = url.absoluteString.lowercased()
+            let path = raw.split(whereSeparator: { $0 == "?" || $0 == "#" }).first.map(String.init) ?? raw
+            if path.hasSuffix(".gif") || path.hasSuffix(".zip") { return true }
+        }
+        return false
+    }
+
+    /// Cover chain: for static booru images in `.auto`/`.full` quality, prefer `sampleURL` (~850px)
+    /// over tiny ~150px `previewURL` thumbnails so Retina grid cards stay sharp and warm viewer cache.
+    /// Video/GIF/ZIP cards and `.preview` mode keep `previewURL` first, with video URLs last for poster
+    /// extraction when no still image exists.
+    static func coverCandidates(for post: BooruPost, imageQuality: ImageQuality) -> [URL] {
         let isMainMediaVideo = MediaImageLoader.isVideoURL(post.sampleURL) || MediaImageLoader.isVideoURL(post.originalURL)
+        let animated = isAnimatedImage(post)
         var staticSources: [URL?] = []
         if isMainMediaVideo, let preview = post.previewURL {
             staticSources.append(preview)
+        } else if highResGridSources.contains(post.sourceID),
+                  imageQuality != .preview,
+                  !isMainMediaVideo,
+                  !animated,
+                  let sample = post.sampleURL {
+            staticSources.append(sample)
         }
         staticSources.append(contentsOf: [
             post.previewURL,
@@ -126,6 +147,10 @@ struct PostCardView: View {
         }
 
         return images + videos
+    }
+
+    private var coverCandidates: [URL] {
+        Self.coverCandidates(for: post, imageQuality: imageQuality)
     }
 
     /// Primary cover candidate.

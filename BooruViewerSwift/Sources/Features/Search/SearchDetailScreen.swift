@@ -11,6 +11,7 @@ struct SearchDetailScreen: View {
     private let context: SourceContext
     private let historyStore: any SearchHistoryStoring
     private let blacklistedTags: [String]
+    private let favoriteKeys: Set<String>
     private let baseFilter: SearchFilterConfig
     private let imageQuality: ImageQuality
     private let gridPreviewsEnabled: Bool
@@ -18,9 +19,12 @@ struct SearchDetailScreen: View {
     /// which re-pushes its `SourceContext` when a Worker URL, API key, or quality edit lands.
     private let contextVersion: Int
     private let sourceProvider: SearchViewModel.SourceProvider
+    private let favoriteTagsStore: (any TagListStoring)?
+    private let blacklistStore: (any TagListStoring)?
+    private let onSelectSource: ((SourceID) -> Void)?
+    private let onToggleFavorite: ((BooruPost) -> Void)?
     private let onOpenPost: ([BooruPost], Int) -> Void
 
-    @State private var model: SearchViewModel
     @State private var pushedTag: TagSearchTarget? = nil
 
     /// - Parameters:
@@ -34,11 +38,16 @@ struct SearchDetailScreen: View {
         context: SourceContext,
         historyStore: any SearchHistoryStoring,
         blacklistedTags: [String] = [],
+        favoriteKeys: Set<String> = [],
         baseFilter: SearchFilterConfig? = nil,
         imageQuality: ImageQuality = .auto,
         gridPreviewsEnabled: Bool = true,
         contextVersion: Int = 0,
         sourceProvider: @escaping SearchViewModel.SourceProvider = { SourceRegistry.source(for: $0) },
+        favoriteTagsStore: (any TagListStoring)? = nil,
+        blacklistStore: (any TagListStoring)? = nil,
+        onSelectSource: ((SourceID) -> Void)? = nil,
+        onToggleFavorite: ((BooruPost) -> Void)? = nil,
         onOpenPost: @escaping ([BooruPost], Int) -> Void = { _, _ in }
     ) {
         self.sourceID = sourceID
@@ -46,25 +55,21 @@ struct SearchDetailScreen: View {
         self.context = context
         self.historyStore = historyStore
         self.blacklistedTags = blacklistedTags
+        self.favoriteKeys = favoriteKeys
         self.imageQuality = imageQuality
         self.gridPreviewsEnabled = gridPreviewsEnabled
         self.contextVersion = contextVersion
         self.sourceProvider = sourceProvider
+        self.favoriteTagsStore = favoriteTagsStore
+        self.blacklistStore = blacklistStore
+        self.onSelectSource = onSelectSource
+        self.onToggleFavorite = onToggleFavorite
         self.onOpenPost = onOpenPost
 
         var config = baseFilter ?? SearchFilterConfig()
         config.tags = SearchViewModel.parseTags(tags)
         config.jumpToPage = 1
         self.baseFilter = config
-
-        _model = State(initialValue: SearchViewModel(
-            sourceID: sourceID,
-            context: context,
-            historyStore: historyStore,
-            blacklistedTags: blacklistedTags,
-            sourceProvider: sourceProvider,
-            initialFilter: config
-        ))
     }
 
     var body: some View {
@@ -73,14 +78,19 @@ struct SearchDetailScreen: View {
             context: context,
             historyStore: historyStore,
             blacklistedTags: blacklistedTags,
+            favoriteKeys: favoriteKeys,
             imageQuality: imageQuality,
             gridPreviewsEnabled: gridPreviewsEnabled,
             contextVersion: contextVersion,
             sourceProvider: sourceProvider,
             initialFilter: baseFilter,
+            favoriteTagsStore: favoriteTagsStore,
+            blacklistStore: blacklistStore,
+            onSelectSource: onSelectSource,
             onOpenTag: { tag in
                 pushedTag = TagSearchTarget(sourceID: sourceID, tags: tag)
             },
+            onToggleFavorite: onToggleFavorite,
             onOpenPost: onOpenPost
         )
         .navigationTitle(tags)
@@ -92,11 +102,16 @@ struct SearchDetailScreen: View {
                 context: context,
                 historyStore: historyStore,
                 blacklistedTags: blacklistedTags,
+                favoriteKeys: favoriteKeys,
                 baseFilter: baseFilter,
                 imageQuality: imageQuality,
                 gridPreviewsEnabled: gridPreviewsEnabled,
                 contextVersion: contextVersion,
                 sourceProvider: sourceProvider,
+                favoriteTagsStore: favoriteTagsStore,
+                blacklistStore: blacklistStore,
+                onSelectSource: onSelectSource,
+                onToggleFavorite: onToggleFavorite,
                 onOpenPost: onOpenPost
             )
         }

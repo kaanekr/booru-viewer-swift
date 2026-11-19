@@ -222,6 +222,16 @@ struct RealbooruSource: BooruSource {
                 if !files.image.isEmpty { break }
             }
         }
+        // Fallback: if no `/images/` link or image exists, allow `/samples/` (still rejecting `/thumbnails/`).
+        if files.mp4.isEmpty, files.webm.isEmpty, files.image.isEmpty {
+            for tag in HTMLScanner.allFirstCaptures(Pattern.imageTag, in: html, caseInsensitive: true) {
+                guard let src = HTMLScanner.attribute("src", in: tag) else { continue }
+                let path = normalizeFileURL(src)
+                guard isSampleImagePath(path) else { continue }
+                store(path: path, into: &files, allowImage: true)
+                if !files.image.isEmpty { break }
+            }
+        }
         return files
     }
 
@@ -250,6 +260,15 @@ struct RealbooruSource: BooruSource {
         let clean = lower.components(separatedBy: "?")[0]
         return videoExtensions.contains { clean.hasSuffix("." + $0) }
             || imageExtensions.contains { clean.hasSuffix("." + $0) }
+    }
+
+    /// Sample image fallback (`/samples/...`), strictly excluding `/thumbnails/` and `thumbnail_`.
+    private static func isSampleImagePath(_ path: String) -> Bool {
+        let lower = path.lowercased()
+        guard !lower.contains("/thumbnails/"), !lower.contains("thumbnail_") else { return false }
+        guard lower.contains("/samples/") || lower.hasPrefix("samples/") else { return false }
+        let clean = lower.components(separatedBy: "?")[0]
+        return imageExtensions.contains { clean.hasSuffix("." + $0) }
     }
 
     private static let imageExtensions = ["gif", "jpg", "jpeg", "png", "webp"]
@@ -313,6 +332,9 @@ struct RealbooruSource: BooruSource {
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
         request.timeoutInterval = MP4Upgrade.timeoutSeconds
+        for (name, value) in MediaRequestConfiguration.headers(for: url) {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
         do {
             let (_, response) = try await http.data(for: request)
             return (200...299).contains(response.statusCode)

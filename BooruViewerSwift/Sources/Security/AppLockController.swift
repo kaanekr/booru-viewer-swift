@@ -15,8 +15,7 @@ enum AppScenePhase: Sendable, Equatable {
 /// - cold start locks when a passcode is enabled (App.tsx:150-157),
 /// - `inactive` only shows the privacy curtain so the lock pad is never mounted over an
 ///   iOS system dialog (App.tsx:176-178),
-/// - `background` always locks when a passcode is enabled (App.tsx:179-190); RN's handler
-///   does not consult `autoLockImmediately`, so neither does this controller,
+/// - `background` locks when a passcode is enabled and `autoLockImmediately` is true,
 /// - the curtain is the `!isForeground || checkingBackgroundLock` cover (App.tsx:265-266).
 @MainActor
 @Observable
@@ -67,14 +66,13 @@ final class AppLockController {
         }
     }
 
-    /// App.tsx:179-190: `.background` always locks when a passcode is enabled — the RN handler
-    /// never consults `autoLockImmediately`. An unreadable config falls back to `true`, so a
-    /// settings read or Keychain failure still locks (RN's `catch` sets the lock as well).
+    /// Locks on `.background` when a passcode is enabled and `autoLockImmediately` is on.
     private func lockForBackground() async {
         isCheckingBackgroundLock = true
         defer { isCheckingBackgroundLock = false }
 
         let config = await currentConfig()
+        guard config.autoLockImmediately else { return }
         if (try? service.isPasscodeEnabled(config: config)) ?? true {
             isLocked = true
         }

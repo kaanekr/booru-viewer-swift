@@ -47,3 +47,8 @@ private func jsonStringLiteral(_ value: String) -> String {
     }
     return out + "\""
 }
+
+extension BooruPost {
+    /// Source-qualified identity safe for cross-source grids (Favorites, Recent Views).
+    var uniqueKey: String { postKey(self) }
+}

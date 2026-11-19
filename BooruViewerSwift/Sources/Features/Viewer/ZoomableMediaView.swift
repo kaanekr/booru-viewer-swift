@@ -11,15 +11,82 @@ import UIKit
 /// images, `AVPlayer` playback with mute + scrubber for videos, and a multi-page
 /// reader when the post carries gallery pages.
 struct ZoomableMediaView: View {
+    struct ImageRequestChain: Equatable {
+        let primary: [URL]
+        let placeholder: URL?
+    }
+
+    static let videoControlsAutoHideDelayNanoseconds: UInt64 = 3_500_000_000
+
+    static func shouldAutoHideVideoControls(
+        isActive: Bool,
+        showsControls: Bool,
+        isPlaying: Bool,
+        isScrubbing: Bool,
+        isInfoPresented: Bool,
+        loadFailed: Bool
+    ) -> Bool {
+        isActive && showsControls && isPlaying && !isScrubbing && !isInfoPresented && !loadFailed
+    }
+
+    static func shouldEarlyReturnFromCache(candidateIndex: Int) -> Bool {
+        candidateIndex == 0
+    }
+
+    static func imageRequestChain(
+        post: BooruPost,
+        media: ResolvedMedia?,
+        imageQuality: ImageQuality,
+        hasUpgradedToOriginal: Bool
+    ) -> ImageRequestChain {
+        let rawPlaceholder = media?.placeholderURL ?? ImageQualityResolver.placeholderURL(for: post)
+        let placeholder = rawPlaceholder.flatMap { isVideoContainerURL($0) ? nil : $0 }
+
+        guard let media else {
+            return ImageRequestChain(primary: [], placeholder: placeholder)
+        }
+
+        let nhentaiCover = post.sourceID == .nhentai ? (post.sampleURL ?? post.previewURL) : nil
+        var candidates: [URL?] = []
+        if imageQuality == .auto, hasUpgradedToOriginal {
+            candidates.append(ImageQualityResolver.imageURL(for: post, quality: .full))
+        }
+        candidates.append(media.imageURL)
+        candidates.append(nhentaiCover)
+
+        var primary: [URL] = []
+        for candidate in candidates {
+            guard let url = candidate,
+                  !isVideoContainerURL(url),
+                  !primary.contains(url) else { continue }
+            primary.append(url)
+        }
+        if primary.isEmpty, let placeholder {
+            primary = [placeholder]
+        }
+        return ImageRequestChain(primary: primary, placeholder: placeholder)
+    }
+
+    private static func isVideoContainerURL(_ url: URL) -> Bool {
+        let raw = url.absoluteString.lowercased()
+        let path = raw.split(whereSeparator: { $0 == "?" || $0 == "#" }).first.map(String.init) ?? raw
+        return [".mp4", ".webm", ".mov", ".m4v", ".m3u8"].contains { path.hasSuffix($0) }
+    }
+
     let post: BooruPost
     let media: ResolvedMedia?
     var isLoading = false
     var isActive = true
     var isMangaMode = false
     var galleryPages: [URL] = []
+    var imageQuality: ImageQuality = .auto
+    var isInfoPresented = false
+    var controlsInteractionToken = 0
     /// Mirrors the viewer's controls visibility so the video transport card hides
     /// together with `ViewerScreen`'s top/bottom bars.
     var showsControls = true
+    /// Explicit visibility setter used by the video auto-hide timer.
+    var onSetControlsVisible: ((Bool) -> Void)? = nil
     /// Single tap on the media toggles the viewer controls (RN `handleToggleControls`).
     var onSingleTap: (() -> Void)?
     /// Reports pinch / double-tap zoom so the viewer can stand down its own
@@ -40,6 +107,9 @@ struct ZoomableMediaView: View {
                     url: videoURL,
                     isActive: isActive,
                     showsControls: showsControls,
+                    isInfoPresented: isInfoPresented,
+                    controlsInteractionToken: controlsInteractionToken,
+                    onSetControlsVisible: onSetControlsVisible,
                     onSingleTap: onSingleTap
                 )
                 .id(videoURL)
@@ -49,7 +119,15 @@ struct ZoomableMediaView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: zoomScale) { _, scale in
-            onZoomChanged?(scale > Self.zoomEpsilon)
+            let zoomed = scale > Self.zoomEpsilon
+            onZoomChanged?(zoomed)
+            if zoomed, imageQuality == .auto, !hasUpgradedToOriginal {
+                hasUpgradedToOriginal = true
+            }
+        }
+        .onChange(of: post.uniqueKey) { _, _ in
+            hasUpgradedToOriginal = false
+            resetZoom()
         }
         // RN resets the previous page's zoom once it stops being the visible one
         // (ImageViewerModal.tsx:1300-1328).
@@ -63,17 +141,27 @@ struct ZoomableMediaView: View {
     private var imagePage: some View {
         GeometryReader { proxy in
             let size = proxy.size
-            let nhentaiCover = post.sourceID == .nhentai ? (post.sampleURL ?? post.previewURL) : nil
-            let imageChain = [media?.imageURL, media?.placeholderURL, nhentaiCover].compactMap { $0 }
+            let chain = Self.imageRequestChain(
+                post: post,
+                media: media,
+                imageQuality: imageQuality,
+                hasUpgradedToOriginal: hasUpgradedToOriginal
+            )
+            let showUnavailable = media != nil && !isLoading && chain.primary.isEmpty && chain.placeholder == nil
 
             ZStack {
                 Color.black
 
-                if imageChain.isEmpty {
+                if showUnavailable {
                     unavailable
                 } else {
-                    PrivateViewerImage(urls: imageChain)
-                        .frame(width: size.width, height: size.height)
+                    PrivateViewerImage(
+                        urls: chain.primary,
+                        placeholderURL: chain.placeholder,
+                        isAwaitingURLs: media == nil,
+                        showsSpinner: !isLoading
+                    )
+                    .frame(width: size.width, height: size.height)
                 }
 
                 if isLoading {
@@ -109,6 +197,7 @@ struct ZoomableMediaView: View {
     @State private var lastScale: CGFloat = 1
     @State private var zoomOffset: CGSize = .zero
     @State private var lastOffset: CGSize = .zero
+    @State private var hasUpgradedToOriginal = false
     /// Anchor of the double-tap zoom: the tapped point, in view-unit coordinates
     /// (RN zooms onto the tap location, ImageViewerModal.tsx:1408-1422).
     @State private var zoomAnchor: UnitPoint = .center
@@ -206,6 +295,9 @@ struct ZoomableMediaView: View {
 /// express either, which left the full-screen image and every nhentai page bare.
 private struct PrivateViewerImage: View {
     let urls: [URL]
+    var placeholderURL: URL? = nil
+    var isAwaitingURLs = false
+    var showsSpinner = true
     var failureText = "Media unavailable"
     /// Set by the manga reader for a page URL that already decoded once: the reload is a
     /// cache fast path, so it runs without flashing the spinner (which would otherwise
@@ -213,6 +305,12 @@ private struct PrivateViewerImage: View {
     var isKnownLoaded = false
     /// Reported after a successful decode so the reader can mark the URL as loaded.
     var onLoaded: ((URL) -> Void)? = nil
+
+    private struct LoadKey: Equatable {
+        let urls: [URL]
+        let placeholderURL: URL?
+        let isAwaitingURLs: Bool
+    }
 
     @State private var image: UIImage?
     @State private var didFail = false
@@ -234,7 +332,7 @@ private struct PrivateViewerImage: View {
                         .font(.footnote)
                 }
                 .foregroundStyle(AppTheme.textSecondary)
-            } else if isKnownLoaded {
+            } else if isKnownLoaded || !showsSpinner {
                 // A page this reader session already decoded once: the URL is in the image
                 // cache, so hold the reserved slot empty for the cache hop instead of
                 // flashing a spinner every time the page scrolls back into view.
@@ -244,49 +342,127 @@ private struct PrivateViewerImage: View {
                     .tint(AppTheme.textPrimary)
             }
         }
-        .task(id: urls) { await load() }
+        .task(id: LoadKey(urls: urls, placeholderURL: placeholderURL, isAwaitingURLs: isAwaitingURLs)) {
+            await load()
+        }
     }
 
-    /// Walks the chain until one URL decodes; a cached image is applied without a
-    /// visible placeholder frame. The loader already retried the other route leg.
-    /// An already-loaded image is kept across view updates, so re-rendering the
-    /// page never flashes the spinner.
+    /// Walks the primary chain first. A cached fallback/placeholder renders immediately
+    /// as a progressive preview without short-circuiting the primary high-res download.
     private func load() async {
-        guard loadedURLs != urls else { return }
-        guard !urls.isEmpty else {
-            image = nil
-            didFail = true
+        var uniqueURLs: [URL] = []
+        for url in urls where !uniqueURLs.contains(url) {
+            uniqueURLs.append(url)
+        }
+
+        if uniqueURLs.isEmpty {
+            didFail = false
+            if isAwaitingURLs {
+                if image == nil, let placeholderURL,
+                   let cached = await MediaImageLoader.shared.cachedImage(for: placeholderURL) {
+                    if Task.isCancelled { return }
+                    image = cached
+                }
+                return
+            }
+            if let placeholderURL {
+                if let cached = await MediaImageLoader.shared.cachedImage(for: placeholderURL) {
+                    if Task.isCancelled { return }
+                    image = cached
+                    loadedURLs = []
+                    onLoaded?(placeholderURL)
+                    return
+                }
+                do {
+                    let loaded = try await MediaImageLoader.shared.image(for: placeholderURL)
+                    if Task.isCancelled { return }
+                    image = loaded
+                    loadedURLs = []
+                    onLoaded?(placeholderURL)
+                    return
+                } catch {}
+            }
+            if image == nil {
+                didFail = true
+            }
             return
         }
 
-        // Fast path: check cache for all candidates first without clearing image.
-        for url in urls {
+        guard loadedURLs != uniqueURLs else { return }
+
+        // Only early-return from cache if the primary desired URL (index 0) is already cached.
+        if ZoomableMediaView.shouldEarlyReturnFromCache(candidateIndex: 0),
+           let cachedPrimary = await MediaImageLoader.shared.cachedImage(for: uniqueURLs[0]) {
             if Task.isCancelled { return }
-            if let cached = await MediaImageLoader.shared.cachedImage(for: url) {
+            image = cachedPrimary
+            loadedURLs = uniqueURLs
+            didFail = false
+            onLoaded?(uniqueURLs[0])
+            return
+        }
+
+        // Progressive preview: display a cached fallback/placeholder immediately while still
+        // fetching `uniqueURLs[0]` (do NOT early-return or mark `loadedURLs`).
+        if image == nil {
+            let progressiveCandidates = Array(uniqueURLs.dropFirst())
+                + ([placeholderURL].compactMap { $0 }.filter { !uniqueURLs.contains($0) })
+            for fallback in progressiveCandidates {
                 if Task.isCancelled { return }
-                image = cached
-                loadedURLs = urls
-                didFail = false
-                onLoaded?(url)
-                return
+                if let cachedFallback = await MediaImageLoader.shared.cachedImage(for: fallback) {
+                    if Task.isCancelled { return }
+                    image = cachedFallback
+                    didFail = false
+                    break
+                }
             }
         }
 
         didFail = false
-        for url in urls {
+        for url in uniqueURLs {
             if Task.isCancelled { return }
+            if let cached = await MediaImageLoader.shared.cachedImage(for: url) {
+                if Task.isCancelled { return }
+                image = cached
+                loadedURLs = uniqueURLs
+                onLoaded?(url)
+                return
+            }
             do {
                 let loaded = try await MediaImageLoader.shared.image(for: url)
                 if Task.isCancelled { return }
                 image = loaded
-                loadedURLs = urls
+                loadedURLs = uniqueURLs
                 onLoaded?(url)
                 return
             } catch {
                 continue
             }
         }
-        image = nil
+
+        if let placeholderURL, !uniqueURLs.contains(placeholderURL) {
+            if let cached = await MediaImageLoader.shared.cachedImage(for: placeholderURL) {
+                if Task.isCancelled { return }
+                image = cached
+                loadedURLs = uniqueURLs
+                didFail = false
+                onLoaded?(placeholderURL)
+                return
+            }
+            if let loaded = try? await MediaImageLoader.shared.image(for: placeholderURL) {
+                if Task.isCancelled { return }
+                image = loaded
+                loadedURLs = uniqueURLs
+                didFail = false
+                onLoaded?(placeholderURL)
+                return
+            }
+        }
+
+        if image != nil {
+            loadedURLs = uniqueURLs
+            didFail = false
+            return
+        }
         didFail = true
     }
 }
@@ -316,6 +492,12 @@ private func clampZoomOffset(
 
 // MARK: - Video playback
 
+/// Shared mute state kept across clips during the app session (RN `sessionVideoMuted`).
+@MainActor
+private enum VideoPlaybackSession {
+    static var isMuted = false
+}
+
 /// `AVPlayer`-backed video page with play/pause, a scrubber and a mute toggle
 /// (RN video controls, ImageViewerModal.tsx:1993-2500).
 ///
@@ -325,19 +507,36 @@ private func clampZoomOffset(
 /// carries the per-host `Referer`/`User-Agent` and routes TLS-fragile CDNs through
 /// the worker; a failed playback retries once on the alternate leg.
 private struct PrivateVideoPlaybackView: View {
+    private struct AutoHideKey: Equatable {
+        let isActive: Bool
+        let showsControls: Bool
+        let isPlaying: Bool
+        let isScrubbing: Bool
+        let isInfoPresented: Bool
+        let loadFailed: Bool
+        let localToken: Int
+        let externalToken: Int
+    }
+
     let url: URL
     var isActive: Bool
     /// Only show the transport card while the viewer's controls are visible.
     var showsControls = true
+    var isInfoPresented = false
+    var controlsInteractionToken = 0
+    var onSetControlsVisible: ((Bool) -> Void)?
     var onSingleTap: (() -> Void)?
 
     @State private var player: AVPlayer?
     @State private var isPlaying = false
-    @State private var isMuted = false
+    @State private var isMuted = VideoPlaybackSession.isMuted
     @State private var currentTime: Double = 0
     @State private var duration: Double = 0
     @State private var isScrubbing = false
+    @State private var loadFailed = false
+    @State private var localInteractionToken = 0
     @State private var timeObserver: Any?
+    @State private var itemStatusObservation: NSKeyValueObservation?
     /// End-of-item observer, bound to the *object* of the current item so a
     /// replaced item can never drive a stale loop.
     @State private var endObserver: NSObjectProtocol?
@@ -352,30 +551,55 @@ private struct PrivateVideoPlaybackView: View {
     /// wants playback.
     @State private var isPageActive = true
 
+    private var autoHideKey: AutoHideKey {
+        AutoHideKey(
+            isActive: isActive,
+            showsControls: showsControls,
+            isPlaying: isPlaying,
+            isScrubbing: isScrubbing,
+            isInfoPresented: isInfoPresented,
+            loadFailed: loadFailed,
+            localToken: localInteractionToken,
+            externalToken: controlsInteractionToken
+        )
+    }
+
     var body: some View {
         ZStack {
-            Color.black
+            Color.black.ignoresSafeArea()
 
-            if let player {
+            if loadFailed {
+                videoFailureOverlay
+            } else if let player {
                 // `.resizeAspect` keeps the whole frame visible (never cropped) and the
                 // surface fills the page, so the video is centred in the viewport.
                 AVPlayerSurfaceView(player: player, videoGravity: .resizeAspect)
                     .ignoresSafeArea()
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .onTapGesture { onSingleTap?() }
-                    .overlay(alignment: .bottom) {
-                        if isActive, showsControls {
-                            playbackControls(player)
-                                .padding(.horizontal, 16)
-                                // Clears `ViewerScreen.bottomBar` (manga / favorite
-                                // buttons) so the card never hides under it.
-                                .padding(.bottom, 96)
-                                .transition(.opacity)
-                        }
+                    .allowsHitTesting(false)
+
+                // Dedicated tap catcher above `AVPlayerSurfaceView` (which has
+                // `isUserInteractionEnabled = false`) so single taps reliably toggle controls.
+                Color.clear
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        localInteractionToken &+= 1
+                        onSingleTap?()
                     }
             } else {
                 ProgressView()
                     .tint(AppTheme.textPrimary)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if !loadFailed, let player, isActive, showsControls {
+                playbackControls(player)
+                    .padding(.horizontal, 16)
+                    // Clears `ViewerScreen.bottomBar` (manga / favorite
+                    // buttons) so the card never hides under it.
+                    .padding(.bottom, 96)
+                    .transition(.opacity)
             }
         }
         .onAppear(perform: setUp)
@@ -388,14 +612,66 @@ private struct PrivateVideoPlaybackView: View {
             isPageActive = active
             guard let player else { return }
             if active {
-                // Coming back to a clip that already ran to the end must replay
-                // from the start instead of resuming at the final frame.
-                resumeFromStartIfEnded(player)
+                if loadFailed {
+                    onSetControlsVisible?(true)
+                } else {
+                    // Coming back to a clip that already ran to the end must replay
+                    // from the start instead of resuming at the final frame.
+                    resumeFromStartIfEnded(player)
+                }
             } else {
                 player.pause()
                 isPlaying = false
             }
         }
+        .task(id: autoHideKey) {
+            guard ZoomableMediaView.shouldAutoHideVideoControls(
+                isActive: isActive,
+                showsControls: showsControls,
+                isPlaying: isPlaying,
+                isScrubbing: isScrubbing,
+                isInfoPresented: isInfoPresented,
+                loadFailed: loadFailed
+            ) else { return }
+            try? await Task.sleep(nanoseconds: ZoomableMediaView.videoControlsAutoHideDelayNanoseconds)
+            guard !Task.isCancelled else { return }
+            guard ZoomableMediaView.shouldAutoHideVideoControls(
+                isActive: isPageActive,
+                showsControls: showsControls,
+                isPlaying: isPlaying,
+                isScrubbing: isScrubbing,
+                isInfoPresented: isInfoPresented,
+                loadFailed: loadFailed
+            ) else { return }
+            onSetControlsVisible?(false)
+        }
+    }
+
+    private var videoFailureOverlay: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.title2)
+                .foregroundStyle(AppTheme.danger)
+            Text("Video failed to load")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(AppTheme.textPrimary)
+            Button {
+                localInteractionToken &+= 1
+                loadFailed = false
+                tearDown()
+                setUp()
+            } label: {
+                Label("Retry", systemImage: "arrow.clockwise")
+                    .font(.footnote.weight(.bold))
+                    .foregroundStyle(Color.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(AppTheme.primary, in: Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(20)
+        .background(AppTheme.surface.opacity(0.92), in: RoundedRectangle(cornerRadius: 16))
     }
 
     /// Classic transport card: scrubber row (time / slider / duration) plus a
@@ -421,6 +697,7 @@ private struct PrivateVideoPlaybackView: View {
                     in: 0...max(duration, 0.1),
                     onEditingChanged: { editing in
                         isScrubbing = editing
+                        localInteractionToken &+= 1
                         if !editing {
                             player.seek(to: CMTime(seconds: currentTime, preferredTimescale: 600))
                         }
@@ -501,9 +778,12 @@ private struct PrivateVideoPlaybackView: View {
     private func setUp() {
         guard player == nil else { return }
         didRetryAlternate = false
+        loadFailed = false
         isDisposed = false
         isPageActive = isActive
-        let newPlayer = AVPlayer(playerItem: MediaRequestConfiguration.makePlayerItem(for: url))
+        isMuted = VideoPlaybackSession.isMuted
+        let item = MediaRequestConfiguration.makePlayerItem(for: url)
+        let newPlayer = AVPlayer(playerItem: item)
         newPlayer.isMuted = isMuted
         player = newPlayer
         currentTime = 0
@@ -526,6 +806,7 @@ private struct PrivateVideoPlaybackView: View {
                 duration = total
             }
         }
+        observeItemStatus(of: item)
         observeEndOfCurrentItem(of: newPlayer)
         if isActive {
             newPlayer.play()
@@ -533,23 +814,50 @@ private struct PrivateVideoPlaybackView: View {
         }
     }
 
-    /// Swaps in the other route leg (direct ⇄ relay) after a playback failure so
-    /// a TLS-fragile or relay-blocked source still plays. Runs at most once.
-    private func retryAlternateLeg() {
-        guard !didRetryAlternate, let player else { return }
-        didRetryAlternate = true
-        let attempts = MediaRequestConfiguration.routeAttempts(for: url)
-        guard attempts.count > 1 else { return }
-        let alternate = attempts[1]
-        player.replaceCurrentItem(with: MediaRequestConfiguration.makePlayerItem(for: alternate))
-        currentTime = 0
-        duration = 0
-        // The replaced item is a different object: re-bind the end observer to it.
-        observeEndOfCurrentItem(of: player)
-        if isActive {
-            player.play()
-            isPlaying = true
+    private func observeItemStatus(of item: AVPlayerItem?) {
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = nil
+        guard let item else { return }
+        let observedID = ObjectIdentifier(item)
+        itemStatusObservation = item.observe(\.status, options: [.new]) { observed, _ in
+            guard observed.status == .failed else { return }
+            Task { @MainActor in
+                guard !isDisposed,
+                      let livePlayer = self.player,
+                      livePlayer.currentItem.map(ObjectIdentifier.init) == observedID else { return }
+                retryAlternateLeg()
+            }
         }
+    }
+
+    /// Swaps in the other route leg (direct ⇄ relay) after a playback failure so
+    /// a TLS-fragile or relay-blocked source still plays. Runs at most once; if no
+    /// alternate leg works, surfaces the retryable failure overlay.
+    private func retryAlternateLeg() {
+        guard !isDisposed, !loadFailed, let player else { return }
+        if !didRetryAlternate {
+            didRetryAlternate = true
+            let attempts = MediaRequestConfiguration.routeAttempts(for: url)
+            if attempts.count > 1 {
+                let alternate = attempts[1]
+                let nextItem = MediaRequestConfiguration.makePlayerItem(for: alternate)
+                player.replaceCurrentItem(with: nextItem)
+                currentTime = 0
+                duration = 0
+                // The replaced item is a different object: re-bind observers to it.
+                observeItemStatus(of: nextItem)
+                observeEndOfCurrentItem(of: player)
+                if isPageActive {
+                    player.play()
+                    isPlaying = true
+                }
+                return
+            }
+        }
+        player.pause()
+        isPlaying = false
+        loadFailed = true
+        onSetControlsVisible?(true)
     }
 
     /// Loops a finished finite clip: observe `didPlayToEndTimeNotification` bound to
@@ -631,6 +939,8 @@ private struct PrivateVideoPlaybackView: View {
 
     private func tearDown() {
         isDisposed = true
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = nil
         removeEndObserver()
         if let timeObserver, let player {
             player.removeTimeObserver(timeObserver)
@@ -642,6 +952,7 @@ private struct PrivateVideoPlaybackView: View {
     }
 
     private func togglePlayback(_ player: AVPlayer) {
+        localInteractionToken &+= 1
         if isPlaying {
             player.pause()
             isPlaying = false
@@ -652,12 +963,15 @@ private struct PrivateVideoPlaybackView: View {
     }
 
     private func toggleMute(_ player: AVPlayer) {
+        localInteractionToken &+= 1
         isMuted.toggle()
+        VideoPlaybackSession.isMuted = isMuted
         player.isMuted = isMuted
     }
 
     /// Relative seek (-10s / +10s), clamped to the clip bounds.
     private func seek(_ player: AVPlayer, by delta: Double) {
+        localInteractionToken &+= 1
         let upperBound = duration > 0 ? duration : max(currentTime + delta, 0)
         let target = min(max(currentTime + delta, 0), upperBound)
         currentTime = target

@@ -114,9 +114,10 @@ struct PINPadView: View {
             }
         }
         .onChange(of: title) { _, _ in
-            pin = ""
-            errorText = nil
-            isErrorState = false
+            if !isSubmitting && !isErrorState {
+                pin = ""
+                errorText = nil
+            }
         }
     }
 
